@@ -135,7 +135,16 @@ itself is silent.
   more pages.
 - If you start getting `HTTP 429`, stop for an hour. The script backs off and
   retries automatically, but repeated 429s mean you're being throttled.
-- LinkedIn's remote filter is imperfect — a few hybrid roles slip through.
+- **LinkedIn's remote filter leaks, and this is the weakest part of the crawl.**
+  Roles titled "(Hybrid)" and "- Onsite" come back inside `f_WT=2`, and the
+  guest pages carry no workplace-type field to check against. Titles and
+  bodies that name a workplace are now rejected, but in a sample of 22
+  postings only 1 confirmed remote and 1 confirmed on-site — the other 20 said
+  nothing either way, so they are kept on LinkedIn's word alone. Treat
+  LinkedIn results as *probably* remote and check the posting before applying.
+- The ATS sources (Greenhouse, Ashby) don't have this problem: their location
+  fields are authoritative, and Ashby names the country outright. Prefer them
+  when you want results you can trust without opening each link.
 - LinkedIn caps any single query at roughly 1000 results, which is why the
   default is 8 narrow queries rather than one broad one.
 - ATS boards (Greenhouse, Ashby) keep postings live far longer than aggregators,

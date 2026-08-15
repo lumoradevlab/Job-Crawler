@@ -176,6 +176,31 @@ REMOTE_STRONG = re.compile(
     r"remote[-\s]friendly|distributed\s+team)", re.I
 )
 
+# LinkedIn's f_WT=2 "Remote" filter leaks — roles titled "(Hybrid)" or
+# "- Onsite" come back inside it — and its guest pages carry no workplace-type
+# field to check, only Seniority, Employment type, Job function and Industries.
+# So the workplace has to be read out of the words instead.
+#
+# "hybrid" is the trap: in mobile it is also a stack ("hybrid app developer"
+# means React Native, not a hybrid office), so it only counts as a workplace
+# when it isn't describing the technology.
+ONSITE = re.compile(
+    r"\b(on-?site|in-office|in\s+the\s+office|"
+    r"hybrid(?!\s*(app|application|mobile|cloud|framework|native|stack)))\b",
+    re.I,
+)
+# The mirror of REMOTE_STRONG. A bare "onsite" in a body means nothing either
+# — "onsite interviews", "onsite with customers" — so only these committed
+# phrasings are allowed to overrule a board's own remote flag.
+ONSITE_STRONG = re.compile(
+    r"((this\s+)?(role|position)\s+is\s+(fully\s+)?(on-?site|hybrid)|"
+    r"\b(on-?site|hybrid)\s+(role|position|schedule)\b|"
+    r"location\s*[-–:]\s*[^.\n]{0,40}\b(hybrid|on-?site)\b|"
+    r"require[ds]?\s+to\s+work\s+(on-?site|in\s+the\s+office)|"
+    r"\d\s*days?\s+(a|per)\s+week\s+in\s+(the\s+)?office)", re.I
+)
+
+
 # A remote posting is only useful here if a US-based applicant may hold it.
 # Boards state that in free text ("Remote - US", "Anywhere", "EMEA only"), so
 # every source is graded through us_status() rather than trusted.
@@ -249,6 +274,11 @@ def keep(job, args):
     if args.easy_apply_only and job.get("easy_apply") != "yes":
         return False
     if not job.get("remote"):
+        return False
+    # A title that names the workplace outranks whatever the board's own
+    # remote filter claimed — unless it offers both ("Remote or Hybrid").
+    where = title + " " + job.get("location", "")
+    if ONSITE.search(where) and not REMOTE_HINT.search(where):
         return False
 
     if not args.anywhere:
@@ -386,6 +416,12 @@ def linkedin_detail(job_id):
     m = re.search(r'<code id="applyUrl"[^>]*>\s*<!--"?(.*?)"?-->', html, re.S)
     if m:
         out["apply_url"] = urllib.parse.unquote(m.group(1).strip()).strip('"')
+
+    # The body is the only other place the workplace is stated, and it is the
+    # one that catches postings whose title stays silent about it.
+    body = out["description"]
+    if ONSITE_STRONG.search(body) and not REMOTE_STRONG.search(body):
+        out["remote"] = False
     return out
 
 
