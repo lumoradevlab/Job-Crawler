@@ -1,0 +1,11 @@
+# Crawl results and run history — regenerated on every run, not source
+*.csv
+*.json
+*_links.txt
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
