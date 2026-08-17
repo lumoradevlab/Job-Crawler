@@ -130,7 +130,15 @@ def fetch(url, tries=4, timeout=20, headers=None):
                 continue
             print(f"  ! HTTP {e.code} on {url}", file=sys.stderr)
             return ""
-        except (urllib.error.URLError, TimeoutError) as e:
+        # OSError, not (URLError, TimeoutError): a read timeout raises
+        # socket.timeout, which on Python 3.9 is neither of those -- it is a
+        # bare OSError subclass, and the two only became aliases in 3.10. So
+        # on 3.9 a slow response escaped this handler, escaped the crawl
+        # function, and killed the whole source: one sluggish Greenhouse board
+        # out of 44 returned zero jobs for all of them. URLError and
+        # socket.timeout are both OSError, so this catches both on every
+        # version.
+        except OSError as e:
             if attempt < tries:
                 time.sleep(delay * attempt)
                 continue
@@ -576,7 +584,14 @@ def crawl_greenhouse(args):
     listed = []
 
     def board(token):
-        data = fetch_json(GH_LIST.format(token), tries=2) or {}
+        # ex.map re-raises on iteration, so an exception here would discard
+        # every other board's results too. One dead company is not worth 43.
+        try:
+            data = fetch_json(GH_LIST.format(token), tries=2) or {}
+        except Exception as e:
+            print(f"  ! {token} board failed: {type(e).__name__}: {e}",
+                  file=sys.stderr)
+            return []
         out = []
         for j in data.get("jobs", []):
             loc = (j.get("location") or {}).get("name", "")
@@ -607,7 +622,10 @@ def crawl_greenhouse(args):
         print(f"  {len(hits)} of those are new; skipping the rest")
 
     def detail(j):
-        data = fetch_json(GH_JOB.format(j["gh_token"], j["gh_id"]), tries=2)
+        try:
+            data = fetch_json(GH_JOB.format(j["gh_token"], j["gh_id"]), tries=2)
+        except Exception:
+            return j  # same reason as board(): keep the other postings
         if not data:
             return j
         body = strip_tags(data.get("content", ""))
@@ -1210,8 +1228,14 @@ SOURCES.update({n: crawl_blocked(n) for n in BLOCKED})
 # number of home and corporate networks (the connection is reset mid-TLS, and
 # curl fails the same way), so it usually just prints an error. Add it back
 # with --source ... hn if your network allows it.
-DEFAULT_SOURCES = ["linkedin", "greenhouse", "ashby", "builtin", "arc", "wwr",
-                   "workingnomads"]
+#
+# Order matters: deduplication keeps the FIRST copy of a (title, company), so
+# whichever source runs first wins. Greenhouse and Ashby lead because they
+# publish real remote flags and link to the company's own careers page, while
+# LinkedIn can only ever say "unconfirmed" and links to an aggregator. With
+# linkedin first, every job posted to both surfaced as the worse copy.
+DEFAULT_SOURCES = ["greenhouse", "ashby", "builtin", "wwr", "workingnomads",
+                   "arc", "linkedin"]
 
 
 # ==========================================================================
