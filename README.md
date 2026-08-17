@@ -16,6 +16,29 @@ Three files are written each run:
 | `android_remote_jobs.csv` | open in Excel/Numbers — title, company, location, date, Easy Apply, link |
 | `android_remote_jobs.json` | same data for scripting |
 
+## LinkedIn cannot prove a job is remote
+
+Worth knowing before you trust a run. LinkedIn's search is sent with its
+remote filter on (`f_WT=2`), but that filter is imperfect *and* the public
+guest pages carry **no workplace field at all** — not on the search card, not
+on the posting page, not in the description. A verified example: an
+`Android Engineer` at Wealthfront came back under a remote-only query listed
+as plain `New York, NY`, with no mention of "remote" anywhere in its 7,000-
+character description.
+
+So LinkedIn postings are reported as `remote: unconfirmed` and marked
+`remote?` in the terminal, rather than claimed as remote. They are kept by
+default — LinkedIn is the highest-volume source — but check one before you
+spend time on it.
+
+```bash
+# only postings a board actually states are remote (drops LinkedIn's)
+python3 crawler.py --verified-remote-only
+```
+
+Greenhouse and Ashby publish real remote flags and per-country locations, so
+they are the sources to trust for genuinely remote US roles.
+
 ## Two behaviours worth knowing first
 
 Both make a run look emptier than it is, and both are deliberate:
@@ -45,14 +68,26 @@ python3 crawler.py --days 7 --full --include-seen
 | `arc` | arc.dev remote board |
 | `wwr` | We Work Remotely RSS feeds |
 | `hn` | Hacker News "Ask HN: Who is hiring?" via the official HN API |
+| `workingnomads` | remote-only board with an open JSON feed — one request, no key |
+| `himalayas` | remote-only board, ~100k postings with explicit per-country data. **Off by default:** its API ignores every search parameter, so it can only be paged blindly — use `--source himalayas --pages 25` for a deep sweep |
 | `remoteok`, `arbeitnow` | free public APIs — work, but off by default |
 
 The two ATS sources are the highest-signal ones: results link straight to the
 company's own careers page rather than an aggregator.
 
-**Not available:** `indeed`, `wellfound` and `dice` block automated access,
-`hired` shut down, and Remotive's API now returns only 16 jobs in total. Asking
-for one of them prints the reason and returns nothing.
+**Not available:** `indeed`, `glassdoor`, `ziprecruiter`, `careerbuilder`,
+`monster`, `snagajob`, `resume-library`, `simplyhired`, `jooble`, `jobcase`,
+`theladders`, `crunchboard`, `wellfound` and `dice` all answer HTTP 403 behind
+bot walls; `careerjet` serves a Cloudflare Turnstile challenge; `us.jobs`,
+`nexxt` and `powertofly` answer 200 but return a JS shell or ignore the search
+keyword; `usajobs` and `adzuna` need registered API keys; `flexjobs` is a paid
+subscription; `job2careers` serves a broken TLS chain; `pangian` 404s;
+`hired` and `stackoverflow` jobs shut down, and `angellist` is now Wellfound.
+Asking for one prints the specific reason and returns nothing:
+
+```bash
+python3 crawler.py --source glassdoor ziprecruiter    # prints why, returns 0
+```
 
 ```bash
 # company career boards only
@@ -104,6 +139,7 @@ python3 crawler.py -k "Kotlin Developer" "Compose Developer" \
 | `--must` / `--exclude` | keyword filters |
 | `--no-filter` | keep every hit, skip the Android/mobile title gate |
 | `--strict-us` | require the posting to name the US (drops worldwide/unlabelled) |
+| `--verified-remote-only` | keep only postings a board states are remote (drops LinkedIn's unconfirmed ones) |
 | `--anywhere` | switch the US gate off entirely |
 | `--delay` | seconds between LinkedIn requests, default 4 — **don't lower this** |
 | `-o, --out` | output basename, default `android_remote_jobs` |
@@ -140,4 +176,11 @@ itself is silent.
   default is 8 narrow queries rather than one broad one.
 - ATS boards (Greenhouse, Ashby) keep postings live far longer than aggregators,
   so `--days 0` surfaces roles the default 60-day window hides.
-- The HN source needs `hacker-news.firebaseio.com`, which some networks block.
+- The HN source needs `hacker-news.firebaseio.com`, which some networks block —
+  the connection is reset mid-handshake and `curl` fails the same way, so it is
+  off by default. Add `hn` to `--source` if your network allows it.
+- **Certificates:** python.org builds on macOS ship an empty certificate
+  directory unless you run their `Install Certificates.command`, which makes
+  *every* request fail with `CERTIFICATE_VERIFY_FAILED`. The script detects
+  that and falls back to the `certifi` bundle automatically — verification
+  stays on. If you ever see a CA warning, run `pip3 install --upgrade certifi`.

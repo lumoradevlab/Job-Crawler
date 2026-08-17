@@ -28,8 +28,10 @@ import concurrent.futures as futures
 import csv
 import gzip
 import json
+import os
 import random
 import re
+import ssl
 import sys
 import time
 import urllib.error
@@ -43,6 +45,44 @@ UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
+
+
+# ==========================================================================
+# TLS trust store
+# ==========================================================================
+def ssl_context():
+    """A verifying SSL context, working around a common macOS install.
+
+    python.org builds ship an *empty* certificate directory and rely on a
+    separate "Install Certificates.command" that many installs never run.
+    Every HTTPS request then dies with CERTIFICATE_VERIFY_FAILED before it
+    reaches a single job board.
+
+    So: try the system trust store first, and fall back to the certifi
+    bundle (already a pip dependency of countless packages, so it is usually
+    present) only when the system one verifies nothing. Verification stays
+    ON in both cases -- this fixes where the certificates are read from, it
+    does not disable the check.
+    """
+    ctx = ssl.create_default_context()
+    paths = ssl.get_default_verify_paths()
+    have_system = bool(paths.cafile) or (
+        paths.capath and os.path.isdir(paths.capath) and os.listdir(paths.capath)
+    )
+    if have_system:
+        return ctx
+    try:
+        import certifi
+    except ImportError:
+        print("  ! no usable CA certificates found. Fix with:\n"
+              "      pip3 install --upgrade certifi\n"
+              "    or run the 'Install Certificates.command' that ships with "
+              "your python.org install.", file=sys.stderr)
+        return ctx
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+SSL_CTX = ssl_context()
 
 DEFAULT_QUERIES = [
     "Android Developer",
@@ -73,7 +113,8 @@ def fetch(url, tries=4, timeout=20, headers=None):
     for attempt in range(1, tries + 1):
         req = urllib.request.Request(url, headers=h)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout,
+                                        context=SSL_CTX) as resp:
                 raw = resp.read()
                 if resp.headers.get("Content-Encoding") == "gzip":
                     raw = gzip.decompress(raw)
@@ -132,7 +173,18 @@ def next_data(html):
 # ==========================================================================
 def row(source, title, company, location, url, posted="", remote=True,
         us=None, description="", match_text=None, **extra):
-    """Every source returns these keys, so one gate can judge them all."""
+    """Every source returns these keys, so one gate can judge them all.
+
+    `remote` is three-state, not a bool:
+      True      the board states the role is remote — trust it
+      False     the board states it is not — drop it
+      "unknown" the board does not say, and nothing in the posting commits
+                either way. Kept by default, dropped by --verified-remote-only.
+
+    The third state exists because LinkedIn's guest endpoints carry no
+    workplace field at all (see crawl_linkedin), so claiming True there was
+    a fabrication — every on-site role inherited it and sailed through keep().
+    """
     d = {
         "source": source,
         "title": (title or "").strip(),
@@ -248,7 +300,14 @@ def keep(job, args):
         return False
     if args.easy_apply_only and job.get("easy_apply") != "yes":
         return False
-    if not job.get("remote"):
+
+    # Three-state remote. A board that says "not remote" is always dropped;
+    # one that says nothing is kept unless the run asked for proof.
+    remote = job.get("remote")
+    if remote == "unknown":
+        if args.verified_remote_only:
+            return False
+    elif not remote:
         return False
 
     if not args.anywhere:
@@ -389,6 +448,30 @@ def linkedin_detail(job_id):
     return out
 
 
+def linkedin_remote(location, description=""):
+    """Grade a LinkedIn posting's remoteness. Usually 'unknown'.
+
+    The search was sent with f_WT=2 (remote), but that filter is imperfect --
+    hybrid and on-site roles come back under it -- and the guest payload
+    carries no workplace field to check it against: not on the search card,
+    not in the detail topcard, not in the description. Verified live against
+    postings returned by a remote-only query: an on-site "New York, NY" role
+    was indistinguishable from a genuinely remote one.
+
+    So the location is graded when it happens to say, and everything else is
+    reported as unknown rather than asserted remote. --verified-remote-only
+    drops the unknowns; by default they are kept and flagged in the output.
+    """
+    if REMOTE_HINT.search(location):
+        return True
+    # A city with no qualifier is how LinkedIn renders on-site AND remote
+    # roles alike, so it proves nothing either way -- only the description
+    # committing in so many words does.
+    if description and REMOTE_STRONG.search(description):
+        return True
+    return "unknown"
+
+
 def crawl_linkedin(args):
     """Run every keyword query, paging until a query runs dry."""
     seen, jobs = set(), []
@@ -431,7 +514,8 @@ def crawl_linkedin(args):
                 jobs.append(row(
                     "linkedin", card["title"], card["company"],
                     card["location"], card["url"], card["posted"],
-                    remote=True, query=query, job_id=card["job_id"],
+                    remote=linkedin_remote(card["location"]),
+                    query=query, job_id=card["job_id"],
                 ))
                 new += 1
             print(f"  page {page + 1}: {len(parser.jobs)} cards, "
@@ -446,9 +530,21 @@ def crawl_linkedin(args):
               f"(~{len(todo) * args.delay / 60:.0f} min)")
         for i, job in enumerate(todo, 1):
             job.update(linkedin_detail(job["job_id"]))
+            # The description is the only place a LinkedIn posting ever
+            # commits to being remote, so re-grade now that we have it.
+            job["remote"] = linkedin_remote(job["location"],
+                                            job.get("description", ""))
+            located = us_status(job["location"])
+            job["us"] = located if located != "unknown" else \
+                us_status(job.get("description", "")[:1500])
             if i % 10 == 0:
                 print(f"  {i}/{len(todo)}")
             time.sleep(args.delay + random.uniform(0, 1.5))
+
+    verified = sum(1 for j in jobs if j["remote"] is True)
+    print(f"[linkedin] {verified} of {len(jobs)} verifiably remote; "
+          f"{len(jobs) - verified} unconfirmed "
+          f"(LinkedIn's guest pages carry no workplace field)")
     return jobs
 
 
@@ -755,6 +851,8 @@ def crawl_arc(args):
                     (j.get("company") or {}).get("name", ""),
                     ", ".join(countries) or "Worldwide",
                     "https://arc.dev/remote-jobs/" + (j.get("urlString") or ""),
+                    # /remote-jobs is a remote-only board, so the listing
+                    # itself is the board's statement that the role is remote.
                     posted, remote=True, us=status, query=q,
                 ))
                 found += 1
@@ -800,10 +898,15 @@ def crawl_wwr(args):
                     ).strftime("%Y-%m-%d")
                 except ValueError:
                     pass
+            # Grade the <region> field alone. Folding in the body let any
+            # posting that merely mentioned a US office read as US-eligible,
+            # so a Berlin-only role graded "us" off its own boilerplate.
+            status = us_status(region)
             jobs.append(row(
                 "wwr", title.strip(), company.strip(), region,
+                # Every WWR feed is a remote board; the region says where.
                 tag("link"), posted, remote=True,
-                us=us_status(region + " " + body[:400]), description=body,
+                us=status, description=body,
             ))
         print(f"[wwr] {feed}: {len(items)} postings")
         time.sleep(1)
@@ -937,6 +1040,92 @@ def crawl_arbeitnow(args):
 
 
 # ==========================================================================
+# Source: Working Nomads
+# ==========================================================================
+# A remote-only board with an open JSON feed — no key, no paging parameters.
+# It returns one page of current listings, so the keyword filtering happens
+# here rather than server-side.
+WORKINGNOMADS_API = "https://www.workingnomads.com/api/exposed_jobs/"
+
+
+def crawl_workingnomads(args):
+    data = fetch_json(WORKINGNOMADS_API) or []
+    out = []
+    for j in data:
+        if not isinstance(j, dict):
+            continue
+        title = j.get("title", "")
+        # The feed carries every category, so gate on the title here; the
+        # tags field is free text and too noisy to trust.
+        if not (args.no_filter or (RELEVANT.search(title) and ROLE.search(title))):
+            continue
+        location = j.get("location") or "Remote"
+        out.append(row(
+            "workingnomads", title, j.get("company_name", ""), location,
+            j.get("url", ""), (j.get("pub_date") or "")[:10],
+            # The whole board is remote-only; location says which region.
+            remote=True,
+            us=us_status(location),
+            description=strip_tags(j.get("description", "")),
+        ))
+    print(f"[workingnomads] {len(data)} postings, {len(out)} Android/mobile")
+    return out
+
+
+# ==========================================================================
+# Source: Himalayas
+# ==========================================================================
+# Remote-only board, ~100k live postings. Two verified quirks: the API caps a
+# page at 20 however large a limit you ask for, and it ignores every search
+# parameter tried (search=, q=, keywords=, category=) — totalCount stays at
+# 101k and the first result is identical each time. So the only way through it
+# is blind offset paging, and the Android hit rate is correspondingly low.
+# locationRestrictions is an explicit country list, the cleanest US signal
+# here after Ashby, which is what makes the source worth keeping at all.
+HIMALAYAS_API = "https://himalayas.app/jobs/api?limit=20&offset=%d"
+HIMALAYAS_PAGE = 20
+
+
+def crawl_himalayas(args):
+    out, scanned = [], 0
+    # Bounded deliberately: with no keyword filter a full sweep would be
+    # ~5000 requests to surface a handful of Android roles. --pages scales it.
+    pages = max(args.pages, 1) * 4
+    for page in range(pages):
+        data = fetch_json(HIMALAYAS_API % (page * HIMALAYAS_PAGE), tries=2)
+        jobs = (data or {}).get("jobs") or []
+        if not jobs:
+            break
+        scanned += len(jobs)
+        for j in jobs:
+            title = j.get("title", "")
+            if not (args.no_filter or (RELEVANT.search(title)
+                                       and ROLE.search(title))):
+                continue
+            countries = j.get("locationRestrictions") or []
+            if countries:
+                status = "us" if any(c.strip().lower() in US_COUNTRY
+                                     for c in countries) else "no"
+            else:
+                status = "worldwide"  # unrestricted: a US applicant qualifies
+            ts = j.get("pubDate")
+            posted = (datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+                      if isinstance(ts, (int, float)) else "")
+            out.append(row(
+                "himalayas", title, j.get("companyName", ""),
+                ", ".join(countries) or "Worldwide",
+                j.get("applicationLink", ""), posted,
+                remote=True,  # remote-only board
+                us=status,
+                description=strip_tags(j.get("excerpt")
+                                       or j.get("description", "")),
+            ))
+        time.sleep(1)
+    print(f"[himalayas] {scanned} postings scanned, {len(out)} Android/mobile")
+    return out
+
+
+# ==========================================================================
 # Sources that cannot be crawled — kept so they explain themselves
 # ==========================================================================
 BLOCKED = {
@@ -947,6 +1136,47 @@ BLOCKED = {
     "jobright": "Server-rendered results ignore the search keyword — asking for "
                 "'android developer' returns unrelated marketing roles. The real "
                 "results come from an API that requires a logged-in account.",
+    # Probed live: every one of these answered 403, or answered 200 with no
+    # job data in the payload. Kept by name so asking for them says why.
+    "careerbuilder": "HTTP 403 — bot wall on /jobs; no public search API.",
+    "glassdoor": "HTTP 403 — bot wall. The Glassdoor partner API was retired "
+                 "and now requires an approved commercial agreement.",
+    "monster": "HTTP 403 — bot wall on /jobs/search.",
+    "ziprecruiter": "HTTP 403 — bot wall. ZipRecruiter's job API is partner-"
+                    "only and needs an API key under a signed agreement.",
+    "snagajob": "HTTP 403 — bot wall; hourly/local roles anyway, little "
+                "overlap with remote Android work.",
+    "resume-library": "HTTP 403 — bot wall on the job listing pages.",
+    "job2careers": "TLS handshake fails — the host serves an untrusted "
+                   "certificate chain; it is now a Talroo redirect domain.",
+    "nexxt": "Answers 200 but ignores the search keyword — the same failure "
+             "as jobright. The page returns generic 'Recommended Jobs' and "
+             "the real results need a logged-in session.",
+    "usjobs": "Answers 200 with a JavaScript shell — us.jobs renders results "
+              "client-side, so the HTML contains no postings (zero matches "
+              "for the query term). The DirectEmployers feed behind it "
+              "requires member credentials.",
+    # Probed from the applyre.com "top 200" list — these were the plausible
+    # tech/remote entries; the rest of that list is healthcare, education,
+    # trades and freelance marketplaces with no Android openings.
+    "simplyhired": "HTTP 403 — bot wall (same Indeed-family infrastructure).",
+    "careerjet": "Cloudflare Turnstile challenge — 'unusual traffic' page.",
+    "jooble": "HTTP 403 — the public search needs a per-partner API key.",
+    "theladders": "HTTP 403 — bot wall; the board is subscriber-only anyway.",
+    "jobcase": "HTTP 403 — bot wall.",
+    "crunchboard": "HTTP 403 — bot wall.",
+    "usajobs": "HTTP 401 — data.usajobs.gov needs a registered API key and "
+               "User-Agent email. Federal roles only; no remote Android work.",
+    "adzuna": "HTTP 400 without credentials — needs an app_id/app_key pair "
+              "from the Adzuna developer portal.",
+    "flexjobs": "Request times out, and FlexJobs is a paid subscription "
+                "service — postings sit behind a login.",
+    "powertofly": "Answers 200 but the listings are captcha-gated and "
+                  "rendered client-side.",
+    "pangian": "HTTP 404 — the public job-board path no longer exists.",
+    "stackoverflow": "Stack Overflow Jobs shut down in 2022; the domain now "
+                     "redirects to the main Q&A site.",
+    "angellist": "Now Wellfound — see the 'wellfound' entry.",
 }
 
 
@@ -968,10 +1198,20 @@ SOURCES = {
     "remotive": crawl_remotive,
     "remoteok": crawl_remoteok,
     "arbeitnow": crawl_arbeitnow,
+    "workingnomads": crawl_workingnomads,
+    "himalayas": crawl_himalayas,
 }
 SOURCES.update({n: crawl_blocked(n) for n in BLOCKED})
 
-DEFAULT_SOURCES = ["linkedin", "greenhouse", "ashby", "builtin", "arc", "wwr", "hn"]
+# himalayas is off by default: it has no keyword filter, so it costs 20+
+# requests to scan a few hundred of its ~100k postings. Ask for it explicitly
+# with --source himalayas --pages 25 when you want a deep sweep.
+# hn is off by default too: hacker-news.firebaseio.com is blocked on a fair
+# number of home and corporate networks (the connection is reset mid-TLS, and
+# curl fails the same way), so it usually just prints an error. Add it back
+# with --source ... hn if your network allows it.
+DEFAULT_SOURCES = ["linkedin", "greenhouse", "ashby", "builtin", "arc", "wwr",
+                   "workingnomads"]
 
 
 # ==========================================================================
@@ -1028,7 +1268,7 @@ def catchup_days(state, wanted, today):
 # ==========================================================================
 # Output
 # ==========================================================================
-COLUMNS = ["source", "title", "company", "location", "us", "posted",
+COLUMNS = ["source", "title", "company", "location", "us", "remote", "posted",
            "first_seen", "easy_apply", "url", "apply_url", "query",
            "description"]
 
@@ -1037,6 +1277,8 @@ def write_outputs(jobs, base):
     for j in jobs:  # internal bookkeeping, not worth writing out
         for k in ("match_text", "gh_token", "gh_id"):
             j.pop(k, None)
+        # The CSV reader wants a word, not True/False/"unknown".
+        j["remote"] = {True: "yes", False: "no"}.get(j["remote"], "unconfirmed")
 
     with open(base + ".csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=COLUMNS, extrasaction="ignore")
@@ -1124,6 +1366,10 @@ def main():
     p.add_argument("--strict-us", action="store_true",
                    help="require the posting to name the US; drops "
                         '"Worldwide"/"Anywhere" and unlabelled listings')
+    p.add_argument("--verified-remote-only", action="store_true",
+                   help="keep only postings the board states are remote. "
+                        "Drops LinkedIn's unconfirmed ones, whose guest "
+                        "pages carry no workplace field at all")
     p.add_argument("--anywhere", action="store_true",
                    help="turn the US gate off entirely (worldwide results)")
     p.add_argument("--delay", type=float, default=4.0,
@@ -1213,14 +1459,23 @@ def main():
         named = sum(1 for j in jobs if j["us"] == "us")
         print(f"  {named} name a US location, {len(jobs) - named} are "
               f'"worldwide"/unlabelled (use --strict-us to drop those)')
+    if jobs and not args.verified_remote_only:
+        unconf = sum(1 for j in jobs if j["remote"] == "unconfirmed")
+        if unconf:
+            print(f"  {unconf} are remote-unconfirmed — the board never said, "
+                  f"so some may be on-site (--verified-remote-only drops them)")
     if args.details:
         print(f"  {sum(1 for j in jobs if j['easy_apply'] == 'yes')} are Easy Apply")
     print()
 
     for j in jobs:
         tag = {"yes": "[easy]", "no": "[site]"}.get(j["easy_apply"], "")
+        # "remote?" marks a posting no board ever confirmed — check it before
+        # you spend time applying.
+        flag = "remote? " if j["remote"] == "unconfirmed" else ""
         print(f"{j['source']:<11}{(j['posted'] or '?'):<12}"
-              f"{j['title'][:42]:<44}{j['company'][:18]:<20}{tag:<7}{j['url']}")
+              f"{j['title'][:42]:<44}{j['company'][:18]:<20}"
+              f"{flag:<8}{tag:<7}{j['url']}")
 
 
 if __name__ == "__main__":
