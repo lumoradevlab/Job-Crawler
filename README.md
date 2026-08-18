@@ -36,8 +36,10 @@ spend time on it.
 python3 crawler.py --verified-remote-only
 ```
 
-Greenhouse and Ashby publish real remote flags and per-country locations, so
-they are the sources to trust for genuinely remote US roles.
+Greenhouse, Ashby and Lever publish real remote flags and per-country
+locations, so they are the sources to trust for genuinely remote US roles —
+Lever bluntest of all: its API answers `workplaceType: remote/hybrid/onsite`
+outright for every posting.
 
 ## Two behaviours worth knowing first
 
@@ -65,6 +67,7 @@ python3 crawler.py --days 7 --full --include-seen
 | `greenhouse` | 44 company ATS boards via the public Greenhouse job-board API |
 | `ashby` | 35 company ATS boards via the public Ashby posting API |
 | `builtin` | builtin.com remote engineering board |
+| `lever` | company ATS boards via the public Lever postings API — every posting carries a literal `remote`/`hybrid`/`onsite` workplace field |
 | `arc` | arc.dev remote board |
 | `wwr` | We Work Remotely RSS feeds |
 | `hn` | Hacker News "Ask HN: Who is hiring?" via the official HN API |
@@ -72,7 +75,7 @@ python3 crawler.py --days 7 --full --include-seen
 | `himalayas` | remote-only board, ~100k postings with explicit per-country data. **Off by default:** its API ignores every search parameter, so it can only be paged blindly — use `--source himalayas --pages 25` for a deep sweep |
 | `remoteok`, `arbeitnow` | free public APIs — work, but off by default |
 
-The two ATS sources are the highest-signal ones: results link straight to the
+The three ATS sources are the highest-signal ones: results link straight to the
 company's own careers page rather than an aggregator.
 
 **Not available:** `indeed`, `glassdoor`, `ziprecruiter`, `careerbuilder`,
@@ -174,7 +177,7 @@ itself is silent.
 - LinkedIn's remote filter is imperfect — a few hybrid roles slip through.
 - LinkedIn caps any single query at roughly 1000 results, which is why the
   default is 8 narrow queries rather than one broad one.
-- ATS boards (Greenhouse, Ashby) keep postings live far longer than aggregators,
+- ATS boards (Greenhouse, Ashby, Lever) keep postings live far longer than aggregators,
   so `--days 0` surfaces roles the default 60-day window hides.
 - The HN source needs `hacker-news.firebaseio.com`, which some networks block —
   the connection is reset mid-handshake and `curl` fails the same way, so it is

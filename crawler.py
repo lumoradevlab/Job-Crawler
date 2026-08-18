@@ -10,6 +10,7 @@ Working sources
   linkedin    public "guest" job search endpoint (no login)
   greenhouse  company ATS boards, via the public Greenhouse job-board API
   ashby       company ATS boards, via the public Ashby posting API
+  lever       company ATS boards, via the public Lever postings API
   builtin     builtin.com remote board (server-rendered job cards)
   arc         arc.dev remote board (Next.js payload)
   wwr         We Work Remotely RSS feeds
@@ -663,25 +664,42 @@ US_COUNTRY = {"united states", "usa", "us", "united states of america"}
 
 
 def ashby_places(job):
-    """Every location on a posting: the primary one plus its alternates.
+    """Every location on a posting as (label, country) pairs, primary first.
 
-    Returns (label, countries). A posting headquartered in New York but open
-    to "Remote (US)" carries that only in secondaryLocations, so reading the
-    primary location alone would misjudge both the remote flag and the country.
+    A posting headquartered in New York but open to "Remote (US)" carries
+    that only in secondaryLocations, so reading the primary location alone
+    would misjudge both the remote flag and the country. The pairs stay
+    separate because the remote offer can be narrower than the posting: a
+    hybrid NYC role with a "Remote (Canada)" alternate is remote for Canada
+    only, and grading US-ness from the NYC address would invert that.
     """
-    places, countries = [], set()
+    pairs = []
 
     def take(loc, addr):
-        if loc:
-            places.append(loc)
         country = ((addr or {}).get("postalAddress") or {}).get("addressCountry")
-        if country:
-            countries.add(country.strip().lower())
+        loc, country = (loc or "").strip(), (country or "").strip().lower()
+        if loc or country:
+            pairs.append((loc, country))
 
     take(job.get("location"), job.get("address"))
     for sec in job.get("secondaryLocations") or []:
         take(sec.get("location"), sec.get("address"))
-    return " / ".join(dict.fromkeys(places)), countries
+    return pairs
+
+
+def ashby_us(pairs):
+    """Grade US-ness from (label, country) pairs, addresses first."""
+    countries = {c for _, c in pairs if c}
+    if countries & US_COUNTRY:
+        return "us"
+    if countries:
+        return "no"
+    joined = " ".join(l for l, _ in pairs)
+    # "Remote (US)" style labels name the country only in the label, in a
+    # form us_status() doesn't read — uppercase-only, so prose "us" can't hit.
+    if re.search(r"\bUS(?:A)?\b", joined):
+        return "us"
+    return us_status(joined)
 
 
 def crawl_ashby(args):
@@ -704,20 +722,34 @@ def crawl_ashby(args):
             if not (args.no_filter or (RELEVANT.search(title)
                                        and ROLE.search(title))):
                 continue
-            label, countries = ashby_places(j)
-            if countries:
-                status = "us" if countries & US_COUNTRY else "no"
+            pairs = ashby_places(j)
+            label = " / ".join(dict.fromkeys(l for l, _ in pairs if l))
+
+            # NOT isRemote: Ashby sets isRemote=true on hybrid office roles
+            # wholesale — one live board carried 108 Hybrid postings, all
+            # isRemote=true, only 27 of which offered any Remote location.
+            # workplaceType and the location labels are what the company
+            # actually declares, so they decide; and when the remote offer
+            # lives in an alternate location ("Remote (US)" beside a hybrid
+            # NYC HQ), the US gate reads those alternates alone.
+            wp = (j.get("workplaceType") or "").strip().lower()
+            remote_pairs = [(l, c) for l, c in pairs if REMOTE_HINT.search(l)]
+            if wp == "remote":
+                remote, scope = True, pairs
+            elif remote_pairs:
+                remote, scope = True, remote_pairs
+            elif wp in ("hybrid", "onsite"):
+                remote, scope = False, pairs
             else:
-                status = us_status(label)
+                remote, scope = "unknown", pairs
+
             body = strip_tags(j.get("descriptionHtml", ""))
             out.append(row(
                 "ashby", title, token.title(), label or "Unspecified",
                 j.get("jobUrl", ""), (j.get("publishedAt") or "")[:10],
-                # workplaceType can read "Hybrid" while a "Remote (US)"
-                # alternate location exists, so isRemote is the flag to trust.
-                remote=bool(j.get("isRemote"))
-                or bool(REMOTE_HINT.search(label)),
-                us=status, description=body,
+                remote=remote,
+                us=ashby_us(scope) if scope else "unknown",
+                description=body,
                 apply_url=j.get("applyUrl", ""),
             ))
         return out
@@ -727,7 +759,77 @@ def crawl_ashby(args):
         for res in ex.map(board, boards):
             listed.extend(res)
     print(f"  {len(listed)} Android/mobile titles, "
-          f"{sum(1 for j in listed if j['remote'])} of them remote")
+          f"{sum(1 for j in listed if j['remote'] is True)} stated remote, "
+          f"{sum(1 for j in listed if j['remote'] is False)} on-site/hybrid")
+    return listed
+
+
+# ==========================================================================
+# Source: Lever company boards
+# ==========================================================================
+# Verified live: every token below answers the public postings API with jobs.
+LEVER_BOARDS = """
+spotify ro shieldai palantir matchgroup zoox outreach pointclickcare
+aircall olo articulate swile entrata
+""".split()
+
+LEVER_LIST = "https://api.lever.co/v0/postings/{}?mode=json"
+
+
+def crawl_lever(args):
+    """One request per company — the postings API returns full postings.
+
+    Lever is the bluntest source here about remoteness: every posting
+    carries a literal workplaceType of "remote" / "hybrid" / "onsite" plus
+    an ISO country code, so both gates read fields the employer set rather
+    than guessing from prose. Its "hybrid" and "onsite" are the only broad
+    supply of genuine remote=False grades any source provides.
+    """
+    boards = getattr(args, "lever_boards", None) or LEVER_BOARDS
+    print(f"[lever] listing {len(boards)} company boards")
+
+    def board(token):
+        # Same reason as the Greenhouse workers: ex.map re-raises on
+        # iteration, so one dead company must not discard the rest.
+        try:
+            data = fetch_json(LEVER_LIST.format(token), tries=2)
+        except Exception as e:
+            print(f"  ! {token} board failed: {type(e).__name__}: {e}",
+                  file=sys.stderr)
+            return []
+        out = []
+        for j in data if isinstance(data, list) else []:
+            title = (j.get("text") or "").strip()
+            if not (args.no_filter or (RELEVANT.search(title)
+                                       and ROLE.search(title))):
+                continue
+            wp = (j.get("workplaceType") or "").strip().lower()
+            country = (j.get("country") or "").strip().upper()
+            cats = j.get("categories") or {}
+            locs = cats.get("allLocations") or [cats.get("location") or ""]
+            posted = ""
+            if j.get("createdAt"):  # milliseconds since the epoch
+                posted = datetime.fromtimestamp(
+                    j["createdAt"] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            out.append(row(
+                "lever", title, token.title(),
+                " / ".join(p for p in locs if p) or country or "Unspecified",
+                j.get("hostedUrl", ""), posted,
+                remote={"remote": True, "hybrid": False,
+                        "onsite": False}.get(wp, "unknown"),
+                us="us" if country == "US" else ("no" if country else None),
+                description=(j.get("descriptionPlain") or "")[:2000],
+                apply_url=j.get("applyUrl", ""),
+            ))
+        return out
+
+    listed = []
+    with futures.ThreadPoolExecutor(max_workers=6) as ex:
+        for res in ex.map(board, boards):
+            listed.extend(res)
+    print(f"  {len(listed)} Android/mobile titles, "
+          f"{sum(1 for j in listed if j['remote'] is True)} stated remote, "
+          f"{sum(1 for j in listed if j['remote'] is False)} on-site/hybrid")
     return listed
 
 
@@ -1209,6 +1311,7 @@ SOURCES = {
     "linkedin": crawl_linkedin,
     "greenhouse": crawl_greenhouse,
     "ashby": crawl_ashby,
+    "lever": crawl_lever,
     "builtin": crawl_builtin,
     "arc": crawl_arc,
     "wwr": crawl_wwr,
@@ -1234,8 +1337,8 @@ SOURCES.update({n: crawl_blocked(n) for n in BLOCKED})
 # publish real remote flags and link to the company's own careers page, while
 # LinkedIn can only ever say "unconfirmed" and links to an aggregator. With
 # linkedin first, every job posted to both surfaced as the worse copy.
-DEFAULT_SOURCES = ["greenhouse", "ashby", "builtin", "wwr", "workingnomads",
-                   "arc", "linkedin"]
+DEFAULT_SOURCES = ["greenhouse", "ashby", "lever", "builtin", "wwr",
+                   "workingnomads", "arc", "linkedin"]
 
 
 # ==========================================================================
@@ -1377,6 +1480,8 @@ def main():
                    help="override the Greenhouse company list")
     p.add_argument("--ashby-boards", nargs="+", metavar="TOKEN",
                    help="override the Ashby company list")
+    p.add_argument("--lever-boards", nargs="+", metavar="TOKEN",
+                   help="override the Lever company list")
     p.add_argument("--details", action="store_true",
                    help="fetch each LinkedIn posting: description + Easy Apply")
     p.add_argument("--easy-apply-only", action="store_true",

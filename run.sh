@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")"
 
-ALL="linkedin greenhouse ashby builtin arc wwr hn remotive remoteok arbeitnow workingnomads himalayas"
+ALL="linkedin greenhouse ashby lever builtin arc wwr hn remotive remoteok arbeitnow workingnomads himalayas"
 
 # The new sources and the --verified-remote-only flag only exist on the
 # fix-remote-verification branch, so say so rather than failing obscurely.
