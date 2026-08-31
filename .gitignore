@@ -1,6 +1,7 @@
 # Crawl results and run history — regenerated on every run, not source
 *.csv
 *.json
+*.jsonl
 *_links.txt
 
 # macOS
