@@ -76,16 +76,17 @@ adds nothing to the archive. `--no-archive` turns the appending off.
 | `adzuna` | Adzuna US index — the highest-volume source that carries **salary** | yes |
 | `usajobs` | federal postings, remote-flagged and unambiguously US | yes |
 | `jooble` | Jooble aggregator, US index | yes |
+| `serpapi` | Google Jobs, via SerpApi — the widest net, and the only structured remote flag | yes |
 | `builtin` | builtin.com remote engineering board | — |
 | `arc` | arc.dev remote board | — |
 | `wwr` | We Work Remotely RSS feeds | — |
 | `hn` | Hacker News "Ask HN: Who is hiring?" via the official HN API | — |
 | `remoteok`, `arbeitnow` | free public APIs — work, but off by default | — |
 
-## The three sources that need a key
+## The four sources that need a key
 
-All free. With no key set, each one prints how to get it and returns nothing,
-so the crawler still runs end to end with zero keys configured.
+All free to start. With no key set, each one prints how to get it and returns
+nothing, so the crawler still runs end to end with zero keys configured.
 
 ```bash
 export ADZUNA_APP_ID="..."      # developer.adzuna.com/signup — instant
@@ -93,6 +94,7 @@ export ADZUNA_APP_KEY="..."
 export USAJOBS_KEY="..."        # developer.usajobs.gov/apirequest — instant
 export USAJOBS_EMAIL="you@example.com"   # must be the address you registered
 export JOOBLE_KEY="..."         # jooble.org/api/about — emailed after review
+export SERPAPI_KEY="..."        # serpapi.com/users/sign_up — instant
 ```
 
 Three things these APIs do not tell you up front:
@@ -121,6 +123,62 @@ Ashby, Lever and Workable all 404 an unknown slug; SmartRecruiters answers
 `200` with an empty list, so a typo there is silent. And on every one of them
 a real company that simply isn't hiring returns exactly what a bad slug
 returns, which is why the only usable proof is a board that answers with jobs.
+
+## Google Jobs (`serpapi`)
+
+Google Jobs is the widest net available — it indexes the aggregators and the
+company boards alike — but Google publishes no API for it, so this goes
+through SerpApi. **It is off by default**; ask for it explicitly:
+
+```bash
+python3 crawler.py --source serpapi linkedin greenhouse ashby
+```
+
+Two things earn it the key:
+
+- **It is the only source with a structured remote flag.** Every other
+  aggregator here — LinkedIn, Adzuna, Jooble — leaves remote to be read out
+  of prose. Google states `work_from_home: true` as a boolean, so those
+  results don't depend on the weakest part of the crawl.
+- **Its links point at the posting, not at Google.** Each result carries a
+  `source_link` to whoever published it, which is what gets kept; Google's
+  own `share_link` is a search URL and is only a last resort.
+
+**The catch is the quota: SerpApi bills one search per keyword per page, and
+the free tier is 250 searches a month.** A default 8-keyword run at one page
+spends 8 of them — about thirty runs a month. That is why it is off by
+default, why pages are capped at 3 however many you ask for, and why every
+run prints what it spent:
+
+```
+[serpapi] "Android Developer": 10 matches
+  10 postings, 1 SerpApi search spent (free tier is 250 a month)
+```
+
+A run of two or three narrow keywords is the way to use it. Quota exhaustion
+and a bad key both arrive as an HTTP 200 with an `error` string rather than a
+failure, so the source stops on the first one instead of spending the rest.
+`https://serpapi.com/account?api_key=...` reports the balance and is itself
+free, so checking never costs a search.
+
+Salary comes through where Google states it, in its own phrasing — `84K–96K a
+year`, `$40 an hour`, `$5,000 a month` — normalised to yearly dollars like
+everything else.
+
+Three things a live run makes obvious, all of them Google's doing rather than
+the crawler's:
+
+- **Almost every location comes back as `Anywhere`.** On a sample search that
+  was 8 postings out of 8. Those grade as "worldwide", which is kept by
+  default and dropped by `--strict-us` — so pairing this source with
+  `--strict-us` will return close to nothing, by design.
+- **Most postings carry no date.** `posted_at` was absent on 6 of 8, and an
+  undated posting always survives the `--days` window, so this source is
+  effectively unfiltered by age.
+- **The link is whichever board Google indexed**, which on that same sample
+  was bebee, lensa and jobmesh as often as Monster, ZipRecruiter or LinkedIn.
+  That is why it ranks below LinkedIn when two sources carry one job — the
+  other source usually owns the page it points at.
 
 ## Growing the board lists
 
@@ -254,7 +312,7 @@ python3 test_crawler.py TestKeep   # one class
 ```
 
 81 cases over the grading logic — `us_status()`, `keep()`, `parse_salary()`,
-`builtin_date()` and the regexes behind them. All of it is pure functions, so
+`relative_date()` and the regexes behind them. All of it is pure functions, so
 the suite never touches the network and runs in well under a second.
 
 This is where a regex tune proves it didn't break a case that used to work,
@@ -290,8 +348,12 @@ for remote work; the word can only go in the query, and what comes back is the
 company's own city. Their postings are graded from the words alone, the same
 way LinkedIn's are, so treat them the way you treat LinkedIn.
 
-**Salary** is collected where a source states it: Adzuna, Himalayas, USAJOBS
-and Jooble. Adzuna flags whether a figure is the posting's own number or its
+Google Jobs is the opposite case and the best of the aggregators for this:
+`work_from_home` is a boolean the API states outright, so those results do not
+depend on reading the workplace out of prose at all.
+
+**Salary** is collected where a source states it: Adzuna, Himalayas, USAJOBS,
+Jooble and Google Jobs. Adzuna flags whether a figure is the posting's own number or its
 model's estimate — estimates are dropped rather than reported as fact — and
 Jooble states pay as prose (`$100k - $120k`, `$80 per hour`), which is parsed
 and annualised at 2080h so `--min-salary` can judge both.

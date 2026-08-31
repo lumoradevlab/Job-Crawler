@@ -2,7 +2,7 @@
 """Tests for the grading logic — the part of the crawler that decides.
 
 Every source normalises into one record and is judged by the same handful of
-pure functions: us_status(), keep(), parse_salary(), builtin_date() and the
+pure functions: us_status(), keep(), parse_salary(), relative_date() and the
 regexes behind them. None of them touch the network, so all of it is testable
 directly, and this file is where a regex tune gets to prove it didn't break a
 case that used to work.
@@ -526,13 +526,13 @@ class TestAnnualise(unittest.TestCase):
 # ==========================================================================
 # Dates
 # ==========================================================================
-class TestBuiltinDate(unittest.TestCase):
-    """Built In posts no timestamps, only "Reposted 3 Days Ago"."""
+class TestRelativeDate(unittest.TestCase):
+    """Built In posts no timestamps at all; Google Jobs posts "3 days ago"."""
 
     TODAY = datetime(2026, 8, 31)
 
     def check(self, text, want):
-        self.assertEqual(c.builtin_date(text, self.TODAY), want)
+        self.assertEqual(c.relative_date(text, self.TODAY), want)
 
     def test_relative_days(self):
         self.check("Reposted 3 Days Ago", "2026-08-28")
@@ -825,6 +825,175 @@ class TestNextData(unittest.TestCase):
         self.assertEqual(c.next_data("<html>nothing here</html>"), {})
         self.assertEqual(c.next_data(
             '<script id="__NEXT_DATA__">not json</script>'), {})
+
+
+# ==========================================================================
+# Google Jobs via SerpApi
+# ==========================================================================
+class TestGoogleSalary(unittest.TestCase):
+    """Google names the interval in words and often omits the currency."""
+
+    def test_a_year(self):
+        self.assertEqual(c.google_salary("84K–96K a year"), (84000, 96000))
+        self.assertEqual(c.google_salary("$100,000–$120,000 a year"),
+                         (100000, 120000))
+
+    def test_an_hour_is_annualised(self):
+        self.assertEqual(c.google_salary("$40 an hour"), (83200, None))
+        self.assertEqual(c.google_salary("$25–$30 an hour"), (52000, 62400))
+
+    def test_a_month_and_a_week(self):
+        self.assertEqual(c.google_salary("$5,000 a month"), (60000, None))
+        self.assertEqual(c.google_salary("$2,000 a week"), (104000, None))
+
+    def test_no_figure(self):
+        for text in ["", None, "competitive", "5 years of experience"]:
+            with self.subTest(text=text):
+                self.assertEqual(c.google_salary(text), (None, None))
+
+
+class TestCrawlSerpApi(unittest.TestCase):
+    """Driven by a trimmed copy of a real google_jobs response."""
+
+    SAMPLE = {
+        "search_metadata": {"status": "Success"},
+        "jobs_results": [
+            {
+                "title": "Mobile Developer - iOS & Android (Remote)",
+                "company_name": "Confer",
+                "location": "Anywhere",
+                "via": "CareerBuilder",
+                "description": "We are looking for a mobile developer...",
+                "share_link": "https://www.google.com/search?ibp=htl;jobs&q=x",
+                "source_link": "https://www.careerbuilder.com/job-details/8b102674",
+                "extensions": ["Work from home", "Full-time",
+                               "No degree mentioned"],
+                "detected_extensions": {"work_from_home": True,
+                                        "schedule_type": "Full-time"},
+                "apply_options": [{"title": "CareerBuilder",
+                                   "link": "https://www.careerbuilder.com/apply"}],
+            },
+            {
+                "title": "Remote Android Developer",
+                "company_name": "DataAnnotation",
+                "location": "Anywhere",
+                "via": "Talents By Vaia",
+                "description": "A cutting-edge AI development company...",
+                "source_link": "https://talents.vaia.com/companies/x/99759093/",
+                "extensions": ["84K–96K a year", "Work from home", "Full-time"],
+                "detected_extensions": {"salary": "84K–96K a year",
+                                        "work_from_home": True,
+                                        "posted_at": "3 days ago"},
+                "apply_options": [{"title": "Talents By Vaia",
+                                   "link": "https://talents.vaia.com/apply"}],
+            },
+            {
+                "title": "Senior Account Executive",
+                "company_name": "Acme",
+                "location": "Austin, TX",
+                "detected_extensions": {"work_from_home": True},
+            },
+        ],
+    }
+
+    def setUp(self):
+        self.real = c.fetch_json
+        self.real_sleep = c.time.sleep     # the paging courtesy pause
+        c.time.sleep = lambda _s: None
+        self.urls = []
+        os.environ["SERPAPI_KEY"] = "test-key"
+        c._SKIPPED.clear()
+
+    def tearDown(self):
+        c.fetch_json = self.real
+        c.time.sleep = self.real_sleep
+        os.environ.pop("SERPAPI_KEY", None)
+        c._SKIPPED.clear()
+
+    def crawl(self, payloads, **over):
+        queue = list(payloads)
+
+        def stub(url, **kw):
+            self.urls.append(url)
+            return queue.pop(0) if queue else None
+
+        c.fetch_json = stub
+        settings = dict(keywords=["Android Developer"], pages=1,
+                        location="United States")
+        settings.update(over)
+        args = make_args(**settings)
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            return c.crawl_serpapi(args), buf.getvalue()
+
+    def test_the_mobile_roles_are_kept_and_the_others_are_not(self):
+        jobs, _ = self.crawl([self.SAMPLE])
+        self.assertEqual([j["title"] for j in jobs],
+                         ["Mobile Developer - iOS & Android (Remote)",
+                          "Remote Android Developer"])
+
+    def test_work_from_home_is_a_real_remote_flag(self):
+        # The only source that states this structurally instead of leaving it
+        # to be read out of prose.
+        jobs, _ = self.crawl([self.SAMPLE])
+        self.assertTrue(all(j["remote"] for j in jobs))
+
+    def test_the_posting_link_beats_the_google_redirect(self):
+        jobs, _ = self.crawl([self.SAMPLE])
+        self.assertEqual(jobs[0]["url"],
+                         "https://www.careerbuilder.com/job-details/8b102674")
+        self.assertNotIn("google.com", jobs[0]["url"])
+        self.assertEqual(jobs[0]["apply_url"],
+                         "https://www.careerbuilder.com/apply")
+
+    def test_salary_and_date_come_off_detected_extensions(self):
+        jobs, _ = self.crawl([self.SAMPLE])
+        self.assertEqual((jobs[1]["salary_min"], jobs[1]["salary_max"]),
+                         (84000, 96000))
+        self.assertEqual(jobs[1]["salary_currency"], "USD")
+        self.assertTrue(jobs[1]["posted"])          # "3 days ago" resolved
+
+    def test_anywhere_survives_the_gate_but_not_strict_us(self):
+        jobs, _ = self.crawl([self.SAMPLE])
+        self.assertEqual(c.us_status(jobs[0]["location"]), "worldwide")
+        self.assertTrue(c.keep(jobs[0], make_args()))
+        self.assertFalse(c.keep(jobs[0], make_args(strict_us=True)))
+
+    def test_a_missing_key_explains_itself_and_spends_nothing(self):
+        os.environ.pop("SERPAPI_KEY")
+        jobs, out = self.crawl([self.SAMPLE])
+        self.assertEqual(jobs, [])
+        self.assertEqual(self.urls, [])
+        self.assertIn("serpapi.com/users/sign_up", out)
+
+    def test_an_error_payload_stops_before_spending_more(self):
+        # Quota exhaustion and a bad key both arrive as a 200 with "error".
+        jobs, _ = self.crawl([{"error": "Your account has run out of searches"}],
+                             keywords=["A Developer", "B Developer"])
+        self.assertEqual(jobs, [])
+        self.assertEqual(len(self.urls), 1)
+
+    def test_pages_are_capped_however_many_are_asked_for(self):
+        page = dict(self.SAMPLE, serpapi_pagination={"next_page_token": "t"})
+        self.crawl([page] * 10, pages=99)
+        self.assertEqual(len(self.urls), c.SERPAPI_MAX_PAGES)
+
+    def test_pagination_follows_the_token_and_stops_without_one(self):
+        first = dict(self.SAMPLE, serpapi_pagination={"next_page_token": "abc"})
+        self.crawl([first, self.SAMPLE], pages=3)
+        self.assertEqual(len(self.urls), 2)
+        self.assertIn("next_page_token=abc", self.urls[1])
+        self.assertNotIn("next_page_token", self.urls[0])
+
+    def test_the_search_is_scoped_to_the_requested_location(self):
+        self.crawl([self.SAMPLE])
+        self.assertIn("engine=google_jobs", self.urls[0])
+        self.assertIn("location=United+States", self.urls[0])
+
+    def test_anywhere_drops_the_location_rather_than_erroring(self):
+        # SerpApi rejects a location it cannot resolve, and "Worldwide" is
+        # not one of its places.
+        self.crawl([self.SAMPLE], location="Worldwide")
+        self.assertNotIn("location=", self.urls[0])
 
 
 # ==========================================================================

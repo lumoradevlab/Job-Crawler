@@ -816,8 +816,12 @@ def builtin_us(location):
     return us_status(location)
 
 
-def builtin_date(text, today=None):
-    """Turn "Reposted 3 Days Ago" into a date; Built In posts no timestamps."""
+def relative_date(text, today=None):
+    """Turn "Reposted 3 Days Ago" into a date.
+
+    Built In posts no timestamps at all, and Google Jobs states its own as
+    "3 days ago" / "22 hours ago", so both are read here.
+    """
     today = today or datetime.now()
     t = text.replace("Reposted", "").strip().lower()
     if not t:
@@ -877,7 +881,7 @@ def crawl_builtin(args):
                     "builtin", strip_tags(title.group(1)),
                     strip_tags(company.group(1)) if company else "",
                     (workplace + " " + location).strip(), link,
-                    builtin_date(strip_tags(posted.group(1)) if posted else ""),
+                    relative_date(strip_tags(posted.group(1)) if posted else ""),
                     remote=bool(REMOTE_HINT.search(workplace)),
                     us=builtin_us(location),
                     description=strip_tags(blurb.group(1)) if blurb else "",
@@ -1512,6 +1516,8 @@ KEYED = {
                 "free instantly at https://developer.usajobs.gov/apirequest/"),
     "jooble": ("JOOBLE_KEY",
                "emailed after review at https://jooble.org/api/about"),
+    "serpapi": ("SERPAPI_KEY",
+                "250 free searches a month at https://serpapi.com/users/sign_up"),
 }
 
 
@@ -1705,6 +1711,130 @@ def crawl_jooble(args):
 
 
 # ==========================================================================
+# Source: Google Jobs, via SerpApi
+# ==========================================================================
+# The widest net here: Google Jobs indexes the aggregators and the company
+# boards alike. Google publishes no API for it, so this goes through SerpApi.
+#
+# Two things earn it the key. It is the only source that states remote as a
+# structured boolean — detected_extensions.work_from_home — rather than
+# leaving it to be read out of prose the way LinkedIn, Adzuna and Jooble do.
+# And each result carries source_link, the posting on whoever published it,
+# so what gets kept is not a Google redirect.
+#
+# The cost is the catch: SerpApi bills one search per keyword per page, and
+# the free tier is 250 searches a MONTH. A default 8-keyword run at one page
+# spends 8 of them, which is why this source is off by default, pages are
+# capped hard, and every run prints what it spent. serpapi.com/account reports
+# the balance and is itself free, so checking costs nothing.
+SERPAPI_SEARCH = "https://serpapi.com/search"
+SERPAPI_MAX_PAGES = 3
+
+# Google states pay without a currency mark as often as with one, and names
+# the interval in words: "84K–96K a year", "$40 an hour", "$5,000 a month".
+# parse_salary() anchors on a "$" that is not reliably there, and making it
+# optional there would read "5 years" out of any job body as a salary — so
+# Google's phrasing gets its own reader.
+GOOGLE_PAY = re.compile(
+    r"\$?\s*([\d,.]+)\s*([km])?\s*(?:[-–—]|to)?\s*"
+    r"(?:\$?\s*([\d,.]+)\s*([km])?)?\s*(?:an?|per)\s+"
+    r"(hour|year|month|week)", re.I)
+
+PAY_PERIODS = {"hour": 2080, "week": 52, "month": 12, "year": 1}
+
+
+def google_salary(text):
+    """Read Google's pay phrasing into yearly dollars, or (None, None)."""
+    m = GOOGLE_PAY.search(text or "")
+    if not m:
+        return None, None
+
+    def num(raw, suffix):
+        if not raw:
+            return None
+        try:
+            value = float(raw.replace(",", ""))
+        except ValueError:
+            return None
+        return value * {"k": 1000, "m": 1000000}.get((suffix or "").lower(), 1)
+
+    per = PAY_PERIODS[m.group(5).lower()]
+    lo, hi = num(m.group(1), m.group(2)), num(m.group(3), m.group(4))
+    return (lo * per if lo else None), (hi * per if hi else None)
+
+
+def crawl_serpapi(args):
+    """Google Jobs results, one SerpApi search per keyword per page."""
+    keys = need_keys("serpapi", "SERPAPI_KEY")
+    if not keys:
+        return []
+    key, = keys
+    pages = max(1, min(args.pages, SERPAPI_MAX_PAGES))
+    out, spent = [], 0
+
+    for q in args.keywords:
+        token, got = None, 0
+        for _ in range(pages):
+            params = {"engine": "google_jobs", "q": q + " remote",
+                      "google_domain": "google.com", "hl": "en", "gl": "us",
+                      "api_key": key}
+            # SerpApi rejects a location it cannot resolve, and "Worldwide"
+            # is not one of its places — so --anywhere drops the parameter
+            # rather than erroring the whole source out.
+            if args.location.strip().lower() not in ("worldwide", "anywhere"):
+                params["location"] = args.location
+            if token:
+                params["next_page_token"] = token
+            data = fetch_json(
+                SERPAPI_SEARCH + "?" + urllib.parse.urlencode(params),
+                tries=2, headers=JSON_ONLY)
+            spent += 1
+            if not data:
+                break
+            # Quota exhaustion and a bad key both arrive as a 200 with an
+            # "error" string, so every further search would be wasted too.
+            if data.get("error"):
+                print(f"  ! serpapi: {data['error']} "
+                      f"({spent} searches spent)", file=sys.stderr)
+                return out
+
+            for j in data.get("jobs_results") or []:
+                title = (j.get("title") or "").strip()
+                if not relevant(title, args):
+                    continue
+                det = j.get("detected_extensions") or {}
+                first = (j.get("apply_options") or [{}])[0]
+                # share_link is a google.com search URL and the worst of the
+                # three, so it is only reached for when the others are absent.
+                link = (j.get("source_link") or first.get("link")
+                        or j.get("share_link") or "")
+                where = (j.get("location") or "").strip()
+                lo, hi = google_salary(det.get("salary") or "")
+                out.append(row(
+                    "serpapi", title, j.get("company_name", ""),
+                    where or "Unspecified", link,
+                    relative_date(det.get("posted_at", "")),
+                    remote=bool(det.get("work_from_home"))
+                    or bool(REMOTE_HINT.search(title + " " + where)),
+                    description=strip_tags(j.get("description") or ""),
+                    apply_url=first.get("link", ""),
+                    salary_min=lo, salary_max=hi,
+                    salary_currency="USD" if lo else "",
+                    query=q,
+                ))
+                got += 1
+
+            token = (data.get("serpapi_pagination") or {}).get("next_page_token")
+            if not token:
+                break
+            time.sleep(1)
+        print(f'[serpapi] "{q}": {got} matches')
+    print(f"  {len(out)} postings, {spent} SerpApi search"
+          f"{'' if spent == 1 else 'es'} spent (free tier is 250 a month)")
+    return out
+
+
+# ==========================================================================
 # Sources that cannot be crawled — kept so they explain themselves
 # ==========================================================================
 BLOCKED = {
@@ -1743,6 +1873,7 @@ SOURCES = {
     "adzuna": crawl_adzuna,
     "usajobs": crawl_usajobs,
     "jooble": crawl_jooble,
+    "serpapi": crawl_serpapi,
 }
 SOURCES.update({n: crawl_blocked(n) for n in BLOCKED})
 
@@ -1788,7 +1919,11 @@ SOURCE_RANK = {
     "greenhouse": 1, "ashby": 1, "lever": 1, "workable": 1,
     "smartrecruiters": 1, "usajobs": 2, "himalayas": 3, "wwr": 4,
     "builtin": 5, "arc": 5, "remoteok": 5, "arbeitnow": 5, "remotive": 5,
-    "hn": 6, "linkedin": 7, "adzuna": 8, "jooble": 9,
+    "hn": 6, "linkedin": 7, "adzuna": 8,
+    # Google Jobs links to whichever board Google indexed, which on a live
+    # sample was bebee, lensa and jobmesh as often as Monster or LinkedIn —
+    # so its link loses to a source that owns the posting it points at.
+    "serpapi": 8, "jooble": 9,
 }
 
 DEFAULT_SOURCES = ["linkedin", "greenhouse", "ashby", "lever", "workable",
