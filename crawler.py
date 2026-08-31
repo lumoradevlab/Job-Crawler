@@ -11,7 +11,6 @@ Working sources
   greenhouse  company ATS boards, via the public Greenhouse job-board API
   ashby       company ATS boards, via the public Ashby posting API
   builtin     builtin.com remote board (server-rendered job cards)
-  arc         arc.dev remote board (Next.js payload)
   wwr         We Work Remotely RSS feeds
   hn          Hacker News "Ask HN: Who is hiring?" via the official HN API
   remotive / remoteok / arbeitnow
@@ -27,6 +26,7 @@ import argparse
 import concurrent.futures as futures
 import csv
 import gzip
+import http.client
 import json
 import os
 import random
@@ -90,7 +90,13 @@ def fetch(url, tries=4, timeout=20, headers=None):
                 continue
             print(f"  ! HTTP {e.code} on {url}", file=sys.stderr)
             return ""
-        except (urllib.error.URLError, TimeoutError) as e:
+        # OSError, not TimeoutError: before Python 3.10 socket.timeout is a
+        # plain OSError subclass, so a read that times out mid-response — the
+        # commonest failure on a slow board — sails straight past a
+        # TimeoutError handler and takes the whole source down with it.
+        # URLError is an OSError too, and HTTPException covers the truncated
+        # responses (IncompleteRead, BadStatusLine) that are not OSErrors.
+        except (OSError, http.client.HTTPException) as e:
             if attempt < tries:
                 time.sleep(delay * attempt)
                 continue
@@ -179,6 +185,25 @@ def annualise(amount, interval):
     except (TypeError, ValueError):
         return None
     return value * 2080 if HOURLY_RATE.match((interval or "").strip()) else value
+
+
+def gather(fn, items, workers=6):
+    """Run fn across items concurrently, keeping whatever succeeds.
+
+    Executor.map re-raises the first exception and abandons every result
+    behind it, so one board timing out loses the other forty-three. Here a
+    failure costs one item and says so.
+    """
+    out = []
+    with futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        pending = {ex.submit(fn, item): item for item in items}
+        for done in futures.as_completed(pending):
+            try:
+                out.append(done.result())
+            except Exception as e:
+                print(f"  ! {pending[done]}: {type(e).__name__}: {e}",
+                      file=sys.stderr)
+    return out
 
 
 # ==========================================================================
@@ -657,9 +682,8 @@ def crawl_greenhouse(args):
             ))
         return out
 
-    with futures.ThreadPoolExecutor(max_workers=6) as ex:
-        for res in ex.map(board, boards):
-            listed.extend(res)
+    for res in gather(board, boards):
+        listed.extend(res)
 
     hits = [j for j in listed if relevant(j["title"], args)]
     print(f"  {len(listed)} postings scanned, {len(hits)} Android/mobile titles")
@@ -685,8 +709,7 @@ def crawl_greenhouse(args):
         j["us"] = located if located != "unknown" else us_status(body[:1500])
         return j
 
-    with futures.ThreadPoolExecutor(max_workers=6) as ex:
-        hits = list(ex.map(detail, hits))
+    hits = gather(detail, hits)
     print(f"  {sum(1 for j in hits if j['remote'])} of them are remote")
     return hits
 
@@ -769,9 +792,8 @@ def crawl_ashby(args):
         return out
 
     listed = []
-    with futures.ThreadPoolExecutor(max_workers=6) as ex:
-        for res in ex.map(board, boards):
-            listed.extend(res)
+    for res in gather(board, boards):
+        listed.extend(res)
     print(f"  {len(listed)} Android/mobile titles, "
           f"{sum(1 for j in listed if j['remote'])} of them remote")
     return listed
@@ -891,39 +913,6 @@ def crawl_builtin(args):
             time.sleep(1)
         print(f'[builtin] "{query}": {found} postings')
     print(f"  {sum(1 for j in jobs if j['remote'])} of {len(jobs)} are remote")
-    return jobs
-
-
-# ==========================================================================
-# Source: Arc.dev
-# ==========================================================================
-def crawl_arc(args):
-    jobs = []
-    for q in args.keywords:
-        url = "https://arc.dev/remote-jobs?" + urllib.parse.urlencode({"search": q})
-        props = next_data(fetch(url))
-        found = 0
-        for key in ("arcJobs", "externalJobs"):
-            for j in props.get(key) or []:
-                countries = j.get("requiredCountries") or []
-                if countries:
-                    status = "us" if "US" in countries else "no"
-                else:
-                    status = "worldwide"
-                posted = ""
-                if isinstance(j.get("postedAt"), (int, float)):
-                    posted = datetime.fromtimestamp(
-                        j["postedAt"], timezone.utc).strftime("%Y-%m-%d")
-                jobs.append(row(
-                    "arc", j.get("title", ""),
-                    (j.get("company") or {}).get("name", ""),
-                    ", ".join(countries) or "Worldwide",
-                    "https://arc.dev/remote-jobs/" + (j.get("urlString") or ""),
-                    posted, remote=True, us=status, query=q,
-                ))
-                found += 1
-        print(f'[arc] "{q}": {found} postings')
-        time.sleep(1)
     return jobs
 
 
@@ -1158,9 +1147,8 @@ def crawl_lever(args):
         return out
 
     listed = []
-    with futures.ThreadPoolExecutor(max_workers=6) as ex:
-        for res in ex.map(board, boards):
-            listed.extend(res)
+    for res in gather(board, boards):
+        listed.extend(res)
     print(f"  {len(listed)} Android/mobile titles, "
           f"{sum(1 for j in listed if j['remote'])} of them remote")
     return listed
@@ -1218,9 +1206,8 @@ def crawl_workable(args):
         return out
 
     listed = []
-    with futures.ThreadPoolExecutor(max_workers=6) as ex:
-        for res in ex.map(board, boards):
-            listed.extend(res)
+    for res in gather(board, boards):
+        listed.extend(res)
     print(f"  {len(listed)} Android/mobile titles, "
           f"{sum(1 for j in listed if j['remote'])} of them remote")
     return listed
@@ -1279,9 +1266,8 @@ def crawl_smartrecruiters(args):
         return out
 
     listed = []
-    with futures.ThreadPoolExecutor(max_workers=6) as ex:
-        for res in ex.map(board, boards):
-            listed.extend(res)
+    for res in gather(board, boards):
+        listed.extend(res)
 
     known = getattr(args, "seen_keys", set())
     hits = [j for j in listed if job_key(j) not in known]
@@ -1299,8 +1285,7 @@ def crawl_smartrecruiters(args):
                 j["remote"] = bool(REMOTE_STRONG.search(body))
         return j
 
-    with futures.ThreadPoolExecutor(max_workers=6) as ex:
-        hits = list(ex.map(detail, hits))
+    hits = gather(detail, hits)
     for j in listed:                       # drop bookkeeping from skipped rows
         j.pop("sr_token", None), j.pop("sr_id", None)
     print(f"  {len(listed)} Android/mobile titles, "
@@ -1845,6 +1830,11 @@ BLOCKED = {
     "jobright": "Server-rendered results ignore the search keyword — asking for "
                 "'android developer' returns unrelated marketing roles. The real "
                 "results come from an API that requires a logged-in account.",
+    "arc": "The remote-jobs search ignores its keyword. Every query returns the "
+           "same ~60 generic postings — searching 'Nurse Practitioner' returns "
+           "remote developer jobs — and across 8 queries exactly one of 58 "
+           "distinct titles mentioned mobile. It was spending 8 requests a run "
+           "to return marketing and Rails roles.",
 }
 
 
@@ -1863,7 +1853,6 @@ SOURCES = {
     "workable": crawl_workable,
     "smartrecruiters": crawl_smartrecruiters,
     "builtin": crawl_builtin,
-    "arc": crawl_arc,
     "wwr": crawl_wwr,
     "hn": crawl_hn,
     "remotive": crawl_remotive,
@@ -1918,7 +1907,7 @@ def dedupe_key(job):
 SOURCE_RANK = {
     "greenhouse": 1, "ashby": 1, "lever": 1, "workable": 1,
     "smartrecruiters": 1, "usajobs": 2, "himalayas": 3, "wwr": 4,
-    "builtin": 5, "arc": 5, "remoteok": 5, "arbeitnow": 5, "remotive": 5,
+    "builtin": 5, "remoteok": 5, "arbeitnow": 5, "remotive": 5,
     "hn": 6, "linkedin": 7, "adzuna": 8,
     # Google Jobs links to whichever board Google indexed, which on a live
     # sample was bebee, lensa and jobmesh as often as Monster or LinkedIn —
@@ -1928,7 +1917,7 @@ SOURCE_RANK = {
 
 DEFAULT_SOURCES = ["linkedin", "greenhouse", "ashby", "lever", "workable",
                    "smartrecruiters", "himalayas", "adzuna", "usajobs",
-                   "builtin", "arc", "wwr", "hn"]
+                   "builtin", "wwr", "hn"]
 
 
 # ==========================================================================

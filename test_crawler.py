@@ -600,6 +600,85 @@ class TestJobKey(unittest.TestCase):
 
 
 # ==========================================================================
+# Resilience: one slow board must not cost a whole source
+# ==========================================================================
+class TestFetchAbsorbsNetworkFailures(unittest.TestCase):
+    """A read that times out mid-response is the commonest board failure, and
+    before Python 3.10 it arrives as socket.timeout — an OSError that is NOT
+    a TimeoutError. Letting it escape fetch() took the whole source down."""
+
+    def setUp(self):
+        self.real = c.urllib.request.urlopen
+        self.real_sleep = c.time.sleep
+        c.time.sleep = lambda _s: None
+
+    def tearDown(self):
+        c.urllib.request.urlopen = self.real
+        c.time.sleep = self.real_sleep
+
+    def raises(self, exc):
+        def boom(*a, **kw):
+            raise exc
+        c.urllib.request.urlopen = boom
+
+    def test_a_socket_timeout_returns_empty_instead_of_propagating(self):
+        import socket
+        self.raises(socket.timeout("The read operation timed out"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(c.fetch("https://example.com/x", tries=1), "")
+
+    def test_a_connection_reset_returns_empty(self):
+        self.raises(ConnectionResetError("Connection reset by peer"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(c.fetch("https://example.com/x", tries=1), "")
+
+    def test_a_truncated_response_returns_empty(self):
+        # IncompleteRead is an HTTPException, not an OSError.
+        self.raises(c.http.client.IncompleteRead(b"partial"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(c.fetch("https://example.com/x", tries=1), "")
+
+    def test_fetch_json_of_a_failed_fetch_is_none(self):
+        import socket
+        self.raises(socket.timeout())
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(c.fetch_json("https://example.com/x", tries=1))
+
+
+class TestGather(unittest.TestCase):
+    """Executor.map re-raises on the first failure and abandons every result
+    behind it — which is how one timing-out board lost the other 43."""
+
+    def run_gather(self, fn, items):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            got = c.gather(fn, items, workers=3)
+        return got, err.getvalue()
+
+    def test_every_result_comes_back_when_nothing_fails(self):
+        got, _ = self.run_gather(lambda n: n * 2, [1, 2, 3, 4])
+        self.assertEqual(sorted(got), [2, 4, 6, 8])
+
+    def test_one_failure_costs_only_that_item(self):
+        def flaky(n):
+            if n == 3:
+                raise TimeoutError("read timed out")
+            return n
+        got, err = self.run_gather(flaky, [1, 2, 3, 4, 5])
+        self.assertEqual(sorted(got), [1, 2, 4, 5])
+        self.assertIn("TimeoutError", err)
+        self.assertIn("3", err)
+
+    def test_the_failing_item_is_named_so_a_bad_board_is_findable(self):
+        def boom(slug):
+            raise ValueError("nope")
+        _, err = self.run_gather(boom, ["stripe"])
+        self.assertIn("stripe", err)
+
+    def test_an_empty_input_is_not_an_error(self):
+        self.assertEqual(self.run_gather(lambda n: n, [])[0], [])
+
+
+# ==========================================================================
 # The archive — the only full record of what has been matched
 # ==========================================================================
 class TestArchive(unittest.TestCase):

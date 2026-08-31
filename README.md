@@ -1,12 +1,18 @@
 # Remote Android/Mobile job crawler
 
 Collects **remote-in-the-USA** Android, Kotlin and mobile engineering job links
-from seven job boards in one pass. Python 3 stdlib only — nothing to install.
+from 18 job boards in one pass. Python 3 stdlib only — nothing to install, no
+virtualenv, no requirements file.
 
 ```bash
-cd ~/remote-job-crawler
+cd "path/to/Job Crawler"
 python3 crawler.py                    # 8 default queries, remote US, last 60 days
+python3 test_crawler.py               # 146 tests, no network, under a second
 ```
+
+The first run takes 10–20 minutes — LinkedIn is paced at 4s a request on
+purpose — and every run after it is far quicker, because the date window
+narrows to what has appeared since.
 
 Files written each run:
 
@@ -78,7 +84,6 @@ adds nothing to the archive. `--no-archive` turns the appending off.
 | `jooble` | Jooble aggregator, US index | yes |
 | `serpapi` | Google Jobs, via SerpApi — the widest net, and the only structured remote flag | yes |
 | `builtin` | builtin.com remote engineering board | — |
-| `arc` | arc.dev remote board | — |
 | `wwr` | We Work Remotely RSS feeds | — |
 | `hn` | Hacker News "Ask HN: Who is hiring?" via the official HN API | — |
 | `remoteok`, `arbeitnow` | free public APIs — work, but off by default | — |
@@ -222,8 +227,36 @@ mangled — HN's is the first line of a post, and Built In sometimes carries a
 slash-joined pair.
 
 **Not available:** `indeed`, `wellfound` and `dice` block automated access,
-`hired` shut down, and Remotive's API now returns only 16 jobs in total. Asking
-for one of them prints the reason and returns nothing.
+`hired` shut down, Remotive's API now returns only 16 jobs in total, and
+`arc` and `jobright` both ignore the search keyword — Arc returns the same
+~60 generic postings whatever you ask for, so searching it for "Nurse
+Practitioner" returns remote Rails jobs. Asking for one of them prints the
+reason and returns nothing.
+
+## What each source is actually worth
+
+Measured on one full sweep (`--full --include-seen --days 0`), 417 jobs:
+
+| source | jobs | why |
+|---|---|---|
+| `linkedin` | 159 | the whole US job market, but its remote filter leaks |
+| `serpapi` | 123 | Google Jobs — indexes everything, structured remote flag |
+| `builtin` | 120 | a large remote-tech board |
+| `hn` | 9 | one thread a month |
+| `ashby` + `greenhouse` + `smartrecruiters` | ~25 | **103 named companies** |
+| `lever`, `workable`, `himalayas`, `wwr` | 0–1 each | see below |
+
+The ATS boards are the highest-*signal* sources and the lowest-*volume* ones,
+and that is structural rather than a bug: Greenhouse scans 6,852 live postings
+across 44 companies to find 46 Android/mobile titles, of which 16 are remote.
+A given company simply does not have an Android opening most weeks. They are
+worth crawling because their locations are authoritative and their links are
+the employer's own — not because they will fill a CSV.
+
+**If a run looks thin, the fix is volume, in this order:** set the Adzuna key
+(second-highest volume, and it carries salary), use `--source serpapi`, and
+run `--discover` to grow the 103 boards. `--why` will tell you which of those
+is actually costing you.
 
 ```bash
 # find new ATS boards from the companies this crawl turns up
