@@ -60,7 +60,7 @@ DEFAULT_QUERIES = [
 # ==========================================================================
 # HTTP
 # ==========================================================================
-def fetch(url, tries=4, timeout=20, headers=None):
+def fetch(url, tries=4, timeout=20, headers=None, quiet_404=False):
     """GET a URL, returning decoded text. Backs off on 429/5xx."""
     h = {
         "User-Agent": UA,
@@ -81,6 +81,12 @@ def fetch(url, tries=4, timeout=20, headers=None):
                 return raw.decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
             if e.code == 404:
+                # A 404 is a real answer — a slug renamed or retired — and
+                # swallowing it is why a board list that has rotted away
+                # reads as a quiet week. Discovery probes expect misses by
+                # the hundred, so only they ask for silence.
+                if not quiet_404:
+                    print(f"  ! HTTP 404 on {url}", file=sys.stderr)
                 return ""
             if e.code in (429, 500, 502, 503) and attempt < tries:
                 wait = delay * attempt + random.uniform(0, 2)
@@ -111,6 +117,44 @@ def fetch_json(url, **kw):
         return json.loads(text) if text else None
     except json.JSONDecodeError:
         return None
+
+
+# A bot wall does not always arrive as a status code. Built In answers a
+# challenge with HTTP 200, a plausible <title> and no job markup at all, so
+# the parser finding nothing is the only signal there is — and "0 postings"
+# is exactly what a genuinely quiet board prints too.
+CHALLENGE = re.compile(
+    r"captcha|are you a robot|cf-browser-verification|challenge-platform|"
+    r"just a moment|attention required|enable javascript and cookies|"
+    r"checking your browser", re.I)
+
+
+def check_parse(source, url, text, what="records"):
+    """Warn that a non-empty response parsed to nothing.
+
+    Call this on the zero-record path only: a page that parsed cleanly to
+    nothing is normal, but bytes that parsed to nothing means the markup
+    moved or a wall went up, and those two deserve to be told apart.
+    """
+    if not text:
+        return
+    wall = CHALLENGE.search(text)
+    why = (f"looks like a bot wall ({wall.group(0).strip()!r})" if wall
+           else "markup may have changed")
+    print(f"  ! {source}: fetched {len(text):,} bytes from {url} but parsed "
+          f"0 {what} — {why}", file=sys.stderr)
+
+
+def report_silent(source, silent, boards):
+    """Name the boards that answered nothing at all.
+
+    A slug that 404s or times out contributes an empty list, exactly like a
+    company with no openings — so without this a rotted list stays invisible.
+    """
+    if not silent:
+        return
+    print(f"  ! {source}: {len(silent)} of {len(boards)} boards returned "
+          f"nothing at all — {' '.join(sorted(silent))}", file=sys.stderr)
 
 
 def strip_tags(html):
@@ -665,10 +709,13 @@ def crawl_greenhouse(args):
     """
     boards = args.boards or board_list("greenhouse", GREENHOUSE_BOARDS, args)
     print(f"[greenhouse] listing {len(boards)} company boards")
-    listed = []
+    listed, silent = [], []
 
     def board(token):
-        data = fetch_json(GH_LIST.format(token), tries=2) or {}
+        data = fetch_json(GH_LIST.format(token), tries=2)
+        if data is None:                  # 404, timeout, or a wall
+            silent.append(token)
+            return []
         out = []
         for j in data.get("jobs", []):
             loc = (j.get("location") or {}).get("name", "")
@@ -684,6 +731,7 @@ def crawl_greenhouse(args):
 
     for res in gather(board, boards):
         listed.extend(res)
+    report_silent("greenhouse", silent, boards)
 
     hits = [j for j in listed if relevant(j["title"], args)]
     print(f"  {len(listed)} postings scanned, {len(hits)} Android/mobile titles")
@@ -764,8 +812,13 @@ def crawl_ashby(args):
     boards = args.ashby_boards or board_list("ashby", ASHBY_BOARDS, args)
     print(f"[ashby] listing {len(boards)} company boards")
 
+    silent = []
+
     def board(token):
-        data = fetch_json(ASHBY_LIST.format(token), tries=2) or {}
+        data = fetch_json(ASHBY_LIST.format(token), tries=2)
+        if data is None:
+            silent.append(token)
+            return []
         out = []
         for j in data.get("jobs", []):
             if j.get("isListed") is False:
@@ -794,6 +847,7 @@ def crawl_ashby(args):
     listed = []
     for res in gather(board, boards):
         listed.extend(res)
+    report_silent("ashby", silent, boards)
     print(f"  {len(listed)} Android/mobile titles, "
           f"{sum(1 for j in listed if j['remote'])} of them remote")
     return listed
@@ -871,8 +925,13 @@ def crawl_builtin(args):
         for page in range(1, args.pages + 1):
             url = BUILTIN_URL + "?" + urllib.parse.urlencode(
                 {"search": query, "page": page})
-            cards = fetch(url).split(BI_CARD)[1:]
+            html = fetch(url)
+            cards = html.split(BI_CARD)[1:]
             if not cards:
+                # Page 1 with no cards is not "no results" — running out of
+                # pages happens later in the loop, never on the first.
+                if page == 1:
+                    check_parse("builtin", url, html, "job cards")
                 break
             for raw in cards:
                 card = re.sub(r"\s+", " ", raw)
@@ -930,8 +989,11 @@ WWR_FEEDS = [
 def crawl_wwr(args):
     jobs = []
     for feed in WWR_FEEDS:
-        xml = fetch(f"https://weworkremotely.com/categories/{feed}.rss")
+        feed_url = f"https://weworkremotely.com/categories/{feed}.rss"
+        xml = fetch(feed_url)
         items = re.findall(r"<item>(.*?)</item>", xml, re.S)
+        if not items:
+            check_parse("wwr", feed_url, xml, "feed items")
         for it in items:
             def tag(name, block=it):
                 m = re.search(rf"<{name}>(.*?)</{name}>", block, re.S)
@@ -1112,9 +1174,12 @@ def crawl_lever(args):
     boards = args.lever_boards or board_list("lever", LEVER_BOARDS, args)
     print(f"[lever] listing {len(boards)} company boards")
 
+    silent = []
+
     def board(token):
         data = fetch_json(LEVER_LIST.format(token), tries=2)
         if not isinstance(data, list):
+            silent.append(token)
             return []
         out = []
         for j in data:
@@ -1149,6 +1214,7 @@ def crawl_lever(args):
     listed = []
     for res in gather(board, boards):
         listed.extend(res)
+    report_silent("lever", silent, boards)
     print(f"  {len(listed)} Android/mobile titles, "
           f"{sum(1 for j in listed if j['remote'])} of them remote")
     return listed
@@ -1176,9 +1242,16 @@ def crawl_workable(args):
     boards = args.workable_boards or board_list("workable", WORKABLE_BOARDS, args)
     print(f"[workable] listing {len(boards)} company boards")
 
+    silent = []
+
     def board(token):
-        data = fetch_json(WORKABLE_LIST.format(token), tries=2) or {}
-        company = data.get("name") or token.title()
+        data = fetch_json(WORKABLE_LIST.format(token), tries=2)
+        if data is None or not data.get("name"):
+            # An unknown slug 404s; a live account always names itself, so
+            # a nameless 200 is a dead entry too.
+            silent.append(token)
+            return []
+        company = data.get("name")
         out = []
         for j in data.get("jobs") or []:
             title = (j.get("title") or "").strip()
@@ -1208,6 +1281,7 @@ def crawl_workable(args):
     listed = []
     for res in gather(board, boards):
         listed.extend(res)
+    report_silent("workable", silent, boards)
     print(f"  {len(listed)} Android/mobile titles, "
           f"{sum(1 for j in listed if j['remote'])} of them remote")
     return listed
@@ -1231,10 +1305,16 @@ def crawl_smartrecruiters(args):
     boards = args.sr_boards or board_list("smartrecruiters", SMARTRECRUITERS_BOARDS, args)
     print(f"[smartrecruiters] listing {len(boards)} company boards")
 
+    silent = []
+
     def board(token):
         out, offset = [], 0
         while offset < 400:               # a company with more than 400 open
-            data = fetch_json(SR_LIST.format(token, offset), tries=2) or {}
+            data = fetch_json(SR_LIST.format(token, offset), tries=2)
+            if data is None:
+                if offset == 0:
+                    silent.append(token)
+                break
             batch = data.get("content") or []
             if not batch:
                 break
@@ -1268,6 +1348,7 @@ def crawl_smartrecruiters(args):
     listed = []
     for res in gather(board, boards):
         listed.extend(res)
+    report_silent("smartrecruiters", silent, boards)
 
     known = getattr(args, "seen_keys", set())
     hits = [j for j in listed if job_key(j) not in known]
@@ -1374,7 +1455,8 @@ def probe_board(slug):
     """Which ATS hosts this slug with live jobs, or None if none of them do."""
     for ats in PROBE_ORDER:
         url, jobs_of = BOARD_PROBES[ats]
-        if jobs_of(fetch_json(url.format(slug), tries=1, timeout=12)):
+        if jobs_of(fetch_json(url.format(slug), tries=1, timeout=12,
+                              quiet_404=True)):
             return ats
     return None
 
