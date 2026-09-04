@@ -1,7 +1,6 @@
 """Google Jobs, via SerpApi — the widest net here."""
 
 import re
-import sys
 import time
 import urllib.parse
 
@@ -34,7 +33,7 @@ SERPAPI_MAX_PAGES = 3
 
 def crawl_serpapi(cfg, ctx):
     """Google Jobs results, one SerpApi search per keyword per page."""
-    keys = need_keys("serpapi", "SERPAPI_KEY")
+    keys = need_keys("serpapi", "SERPAPI_KEY", report=ctx.report)
     if not keys:
         return []
     key, = keys
@@ -63,13 +62,13 @@ def crawl_serpapi(cfg, ctx):
             # Quota exhaustion and a bad key both arrive as a 200 with an
             # "error" string, so every further search would be wasted too.
             if data.get("error"):
-                print(f"  ! serpapi: {data['error']} "
-                      f"({spent} searches spent)", file=sys.stderr)
+                ctx.report.warn(f"  ! serpapi: {data['error']} "
+                                f"({spent} searches spent)")
                 return out
 
             for j in data.get("jobs_results") or []:
                 title = (j.get("title") or "").strip()
-                if not relevant(title, cfg.filters, "serpapi"):
+                if not relevant(title, cfg.filters, "serpapi", ctx.report):
                     continue
                 det = j.get("detected_extensions") or {}
                 first = (j.get("apply_options") or [{}])[0]
@@ -96,7 +95,7 @@ def crawl_serpapi(cfg, ctx):
             token = (data.get("serpapi_pagination") or {}).get("next_page_token")
             if not token:
                 break
-        print(f'[serpapi] "{q}": {got} matches')
-    print(f"  {len(out)} postings, {spent} SerpApi search"
+        ctx.report.source("serpapi", f'"{q}": {got} matches')
+    ctx.report.detail(f"{len(out)} postings, {spent} SerpApi search"
           f"{'' if spent == 1 else 'es'} spent (free tier is 250 a month)")
     return out

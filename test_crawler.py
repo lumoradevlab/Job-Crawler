@@ -426,9 +426,7 @@ class TestRelevant(unittest.TestCase):
     detail fetch — and the ledger that keeps those drops visible to --why."""
 
     def setUp(self):
-        c._SKIPPED.clear()
-
-    tearDown = setUp
+        self.report = c.Reporter(quiet=True)
 
     def test_it_is_the_same_gate_keep_applies(self):
         self.assertTrue(c.relevant("Android Engineer", make_args()))
@@ -439,33 +437,31 @@ class TestRelevant(unittest.TestCase):
                                    make_args(no_filter=True)))
 
     def test_nothing_is_recorded_unless_why_asked(self):
-        c.relevant("Account Executive", make_args())
-        self.assertEqual(c._SKIPPED, [])
+        c.relevant("Account Executive", make_args(), "ashby", self.report)
+        self.assertEqual(self.report.skips, [])
 
     def test_why_records_the_title_against_its_source(self):
         # The source passes its own name rather than the gate reading a
         # mutable "who is running now" field off shared state.
         args = make_args(why=True)
-        c.relevant("Account Executive", args, "ashby")
-        c.relevant("Android Engineer", args, "ashby")   # kept, not recorded
-        self.assertEqual(c._SKIPPED, [("ashby", "Account Executive")])
+        c.relevant("Account Executive", args, "ashby", self.report)
+        c.relevant("Android Engineer", args, "ashby", self.report)  # kept
+        self.assertEqual(self.report.skips, [("ashby", "Account Executive")])
 
 
 class TestReportRejections(unittest.TestCase):
 
     def setUp(self):
-        c._SKIPPED.clear()
         self.dir = tempfile.mkdtemp()
 
     def tearDown(self):
-        c._SKIPPED.clear()
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def report(self, rejected):
+    def report(self, rejected, skipped=()):
         base = os.path.join(self.dir, "run")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            c.report_rejections(rejected, base)
+            c.report_rejections(rejected, base, skipped)
         with open(base + "_rejected.csv", encoding="utf-8") as fh:
             return list(csv.DictReader(fh)), buf.getvalue()
 
@@ -480,8 +476,7 @@ class TestReportRejections(unittest.TestCase):
 
     def test_source_dropped_titles_are_included(self):
         # Otherwise the rule that rejects the most postings is invisible.
-        c._SKIPPED.append(("greenhouse", "Account Executive"))
-        rows, out = self.report([])
+        rows, out = self.report([], [("greenhouse", "Account Executive")])
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["source"], "greenhouse")
         self.assertIn("not-mobile", rows[0]["reason"])
@@ -919,11 +914,9 @@ class TestCrawlSerpApi(unittest.TestCase):
     def setUp(self):
         self.urls = []
         os.environ["SERPAPI_KEY"] = "test-key"
-        c._SKIPPED.clear()
 
     def tearDown(self):
         os.environ.pop("SERPAPI_KEY", None)
-        c._SKIPPED.clear()
 
     def crawl(self, payloads, **over):
         """Run the source against recorded payloads, with no network at all.

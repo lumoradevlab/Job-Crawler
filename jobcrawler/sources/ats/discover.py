@@ -108,10 +108,10 @@ def discover_boards(companies, boards, today, ctx):
 
     slugs = list(queue)[:DISCOVER_CAP]
     if not slugs:
-        print("[discover] no new company names to probe")
+        ctx.report.source("discover", "no new company names to probe")
         return 0
     waiting = len(queue) - len(slugs)
-    print(f"[discover] probing {len(slugs)} candidate slugs across "
+    ctx.report.source("discover", f"probing {len(slugs)} candidate slugs across "
           f"{len(PROBE_ORDER)} ATSes"
           + (f", {waiting} more next run" if waiting else ""))
 
@@ -123,9 +123,9 @@ def discover_boards(companies, boards, today, ctx):
                 found.setdefault(ats, []).append(slug)
                 missed.pop(slug, None)
                 hits += 1
-                print(f"  + {ats}: {slug}   ({queue[slug]})")
+                ctx.report.detail(f"+ {ats}: {slug}   ({queue[slug]})")
             else:
                 missed[slug] = today
-    print(f"  {hits} new board{'' if hits == 1 else 's'}, "
+    ctx.report.detail(f"{hits} new board{'' if hits == 1 else 's'}, "
           f"{len(slugs) - hits} slugs did not answer")
     return hits

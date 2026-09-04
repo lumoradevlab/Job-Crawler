@@ -1,7 +1,6 @@
 """The command line: parse the flags, then run the pipeline."""
 
 import argparse
-import sys
 from datetime import datetime
 
 from .config import CrawlConfig, FilterConfig
@@ -12,6 +11,7 @@ from .net.http import Fetcher
 from .net.ratelimit import HostPolicy, RateLimiter
 from .models import row  # noqa: F401  (kept on the module for the shim)
 from .pipeline.dedupe import SOURCE_RANK, dedupe_key
+from .report.events import Reporter
 from .report.writers import (SALARY_FIELDS, report_rejections,
                              strip_bookkeeping, write_outputs)
 from .sources.ats.discover import discover_boards
@@ -33,7 +33,7 @@ DEFAULT_QUERIES = [
 ]
 
 
-def build(args, days, today, state, boards_found):
+def build(args, report, days, today, state, boards_found):
     """Turn the parsed flags into the two objects a source is handed.
 
     This is the only place that reads an argparse Namespace. Everything
@@ -75,7 +75,8 @@ def build(args, days, today, state, boards_found):
     limiter.set_policy("www.linkedin.com",
                        HostPolicy(gap=cfg.delay, jitter=1.5))
     ctx = RunContext(
-        fetch=Fetcher(limiter=limiter),
+        fetch=Fetcher(limiter=limiter, report=report),
+        report=report,
         today=today,
         seen_keys=set() if args.include_seen else {k for k in state
                                                   if k != META},
@@ -84,7 +85,7 @@ def build(args, days, today, state, boards_found):
     return cfg, ctx
 
 
-def report_network(stats, kept):
+def report_network(stats, kept, report):
     """Say what the network did, so an empty run is never ambiguous.
 
     A crawler that reports "0 jobs" after every single request failed is
@@ -97,19 +98,20 @@ def report_network(stats, kept):
     if stats.total_blackout():
         kinds = ", ".join(f"{k} x{n}" for k, n in
                           sorted(stats.by_kind().items(), key=lambda kv: -kv[1]))
-        print(f"\n  !! every request failed: {stats.requests} of "
-              f"{stats.requests} ({kinds})", file=sys.stderr)
-        print("     the run reached no board at all, so '0 jobs' above says "
-              "nothing about what is out there.", file=sys.stderr)
+        report.warn(f"\n  !! every request failed: {stats.requests} of "
+                    f"{stats.requests} ({kinds})")
+        report.warn("     the run reached no board at all, so '0 jobs' above "
+                    "says nothing about what is out there.")
         if "SSLCertVerificationError" in stats.by_kind():
-            print("     no CA certificates: run the Install Certificates "
-                  "command that ships with python.org Python, or set "
-                  "SSL_CERT_FILE.", file=sys.stderr)
+            report.warn("     no CA certificates: run the Install Certificates "
+                        "command that ships with python.org Python, or set "
+                        "SSL_CERT_FILE.")
     elif stats.failed:
         hosts = ", ".join(f"{h} {n}" for h, n in
                           sorted(stats.by_host().items(), key=lambda kv: -kv[1])[:3])
-        print(f"  {stats.failed} of {stats.requests} requests failed "
-              f"({hosts})" + ("; some boards were not read" if not kept else ""))
+        report.detail(f"{stats.failed} of {stats.requests} requests failed "
+                      f"({hosts})"
+                      + ("; some boards were not read" if not kept else ""))
 
 
 def main():
@@ -224,9 +226,13 @@ def main():
                         "last run")
     p.add_argument("--reset-seen", action="store_true",
                    help="forget the run history and start counting again")
+    p.add_argument("-q", "--quiet", action="store_true",
+                   help="print only the results and any warnings — for cron, "
+                        "where the per-source progress is just noise")
     p.add_argument("--state", metavar="FILE",
                    help="seen-job history file (default <out>_seen.json)")
     args = p.parse_args()
+    report = Reporter(quiet=args.quiet)
     state_path = args.state or (args.out + "_seen.json")
 
     # --anywhere with the default location would still pin LinkedIn to the US.
@@ -245,8 +251,8 @@ def main():
     boards_found = boards.get("found", {})
     grown = sum(len(v) for v in boards_found.values())
     if grown:
-        print(f"{grown} discovered board{'' if grown == 1 else 's'} "
-              f"from {boards_path}")
+        report.line(f"{grown} discovered board{'' if grown == 1 else 's'} "
+                    f"from {boards_path}")
 
     days = args.days
     # A replay re-filters what is already on disk; narrowing the window to
@@ -254,12 +260,12 @@ def main():
     if not args.full and args.days and not args.replay:
         narrowed = catchup_days(state, args.days, today)
         if narrowed != args.days:
-            print(f"catching up: asking for the last {narrowed} days instead "
-                  f"of {args.days} (last run {state[META]['last_run']}); "
-                  f"--full re-sweeps the whole window")
+            report.line(f"catching up: asking for the last {narrowed} days "
+                        f"instead of {args.days} (last run "
+                        f"{state[META]['last_run']}); --full re-sweeps it all")
             days = narrowed
 
-    cfg, ctx = build(args, days, today, state, boards_found)
+    cfg, ctx = build(args, report, days, today, state, boards_found)
     filters = cfg.filters
 
     archive_path = args.out + "_archive.jsonl"
@@ -272,18 +278,17 @@ def main():
         collected = load_archive(archive_path)
         args.include_seen = True
         ctx.seen_keys = set()
-        print(f"replaying {len(collected)} archived postings from "
-              f"{archive_path} — nothing will be fetched")
+        report.line(f"replaying {len(collected)} archived postings from "
+                    f"{archive_path} — nothing will be fetched")
     else:
         for name in cfg.sources:
             try:
                 collected.extend(SOURCES[name](cfg, ctx))
             except KeyboardInterrupt:
-                print("\ninterrupted — writing what we have")
+                report.result("\ninterrupted — writing what we have")
                 break
             except Exception as e:              # keep other sources alive
-                print(f"  ! {name} failed: {type(e).__name__}: {e}",
-                      file=sys.stderr)
+                report.warn(f"  ! {name} failed: {type(e).__name__}: {e}")
 
     # Every result names a company, and a company name is a candidate ATS
     # slug — so this run's aggregator hits become next run's board list.
@@ -367,25 +372,29 @@ def main():
         by_source[j["source"]] = by_source.get(j["source"], 0) + 1
 
     seen_before = total_matched - len(fresh)
-    print(f"\n{len(jobs)} jobs -> {args.out}.csv / .json / _links.txt")
-    print(f"  {len(fresh)} new since the last run, {seen_before} already "
-          f"reported ({total_matched} matched in total)")
+    ctx.report.result(f"\n{len(jobs)} jobs -> {args.out}.csv / .json / _links.txt")
+    ctx.report.result(f"  {len(fresh)} new since the last run, {seen_before} "
+                      f"already reported ({total_matched} matched in total)")
     if archived:
-        print(f"  {archived} appended to {archive_path}")
+        ctx.report.result(f"  {archived} appended to {archive_path}")
     if by_source:
-        print("  " + ", ".join(f"{k}: {v}" for k, v in sorted(by_source.items())))
+        ctx.report.result("  " + ", ".join(f"{k}: {v}"
+                                           for k, v in sorted(by_source.items())))
     if jobs and not args.anywhere:
         named = sum(1 for j in jobs if j["us"] == "us")
-        print(f"  {named} name a US location, {len(jobs) - named} are "
-              f'"worldwide"/unlabelled (use --strict-us to drop those)')
+        ctx.report.result(f"  {named} name a US location, {len(jobs) - named} "
+                          f'are "worldwide"/unlabelled (--strict-us drops those)')
     if args.details:
-        print(f"  {sum(1 for j in jobs if j['easy_apply'] == 'yes')} are Easy Apply")
-    report_network(ctx.fetch.stats, len(jobs))
+        ctx.report.result(
+            f"  {sum(1 for j in jobs if j['easy_apply'] == 'yes')} are Easy Apply")
+    report_network(ctx.fetch.stats, len(jobs), ctx.report)
     if filters.why:
-        report_rejections(rejected, args.out)
-    print()
+        report_rejections(rejected, args.out, ctx.report.skips,
+                          ctx.report)
+    ctx.report.result()
 
     for j in jobs:
         tag = {"yes": "[easy]", "no": "[site]"}.get(j["easy_apply"], "")
-        print(f"{j['source']:<11}{(j['posted'] or '?'):<12}"
-              f"{j['title'][:42]:<44}{j['company'][:18]:<20}{tag:<7}{j['url']}")
+        ctx.report.result(f"{j['source']:<11}{(j['posted'] or '?'):<12}"
+                          f"{j['title'][:42]:<44}{j['company'][:18]:<20}"
+                          f"{tag:<7}{j['url']}")

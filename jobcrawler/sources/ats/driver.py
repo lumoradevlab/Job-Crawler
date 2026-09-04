@@ -85,7 +85,7 @@ def _payloads(spec, token, ctx):
 def crawl_boards(spec, cfg, ctx):
     """List every board for one ATS, gate the titles, detail the hits."""
     boards = cfg.override_for(spec.name) or board_list(spec.name, spec.boards, ctx)
-    print(f"[{spec.name}] listing {len(boards)} company boards")
+    ctx.report.source(spec.name, f"listing {len(boards)} company boards")
 
     def one_board(token):
         # Counting inside the worker and summing after keeps this free of
@@ -97,7 +97,7 @@ def crawl_boards(spec, cfg, ctx):
                     continue
                 scanned += 1
                 title = (spec.title_of(raw) or "").strip()
-                if not relevant(title, cfg.filters, spec.name):
+                if not relevant(title, cfg.filters, spec.name, ctx.report):
                     continue
                 found.append(spec.to_posting(raw, token, data))
         return scanned, found
@@ -107,7 +107,7 @@ def crawl_boards(spec, cfg, ctx):
         for n, rows in ex.map(one_board, boards):
             scanned += n
             listed.extend(rows)
-    print(f"  {scanned} postings scanned, {len(listed)} Android/mobile titles")
+    ctx.report.detail(f"{scanned} postings scanned, {len(listed)} Android/mobile titles")
 
     hits = listed
     if spec.detail_url:
@@ -115,7 +115,7 @@ def crawl_boards(spec, cfg, ctx):
         # per posting, so never re-read one an earlier run already stored.
         hits = [j for j in listed if job_key(j) not in ctx.seen_keys]
         if ctx.seen_keys:
-            print(f"  {len(hits)} of those are new; skipping the rest")
+            ctx.report.detail(f"{len(hits)} of those are new; skipping the rest")
 
         def detail(j):
             data = ctx.fetch.get_json(spec.detail_url(j), tries=spec.tries)
@@ -129,7 +129,7 @@ def crawl_boards(spec, cfg, ctx):
     for j in listed:            # scratch fields never reach the output
         for k in spec.ref_keys:
             j.pop(k, None)
-    print(f"  {sum(1 for j in hits if j['remote'])} of them are remote")
+    ctx.report.detail(f"{sum(1 for j in hits if j['remote'])} of them are remote")
     return hits
 
 

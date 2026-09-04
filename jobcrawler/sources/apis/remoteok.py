@@ -16,5 +16,5 @@ def crawl_remoteok(cfg, ctx):
             (j.get("date") or "")[:10], remote=True,
             description=strip_tags(j.get("description", "")),
         ))
-    print(f"[remoteok] {len(out)} postings")
+    ctx.report.source("remoteok", f"{len(out)} postings")
     return out

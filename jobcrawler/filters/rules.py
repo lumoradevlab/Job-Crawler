@@ -19,12 +19,8 @@ ROLE = re.compile(
 # Most sources apply the title gate themselves, before paying for a detail
 # fetch — so a non-mobile title never reaches keep() and --why would report
 # nothing about the rule that rejects the most postings by far. Routing all
-# of them through one helper keeps that visible. list.append is atomic under
-# the GIL, so the crawlers' worker threads can write here without a lock.
-_SKIPPED = []
-
-
-def relevant(title, filters, source="?"):
+# of them through one helper keeps that visible.
+def relevant(title, filters, source="?", report=None):
     """The Android/mobile title gate the sources apply for themselves.
 
     The source names itself rather than the gate reading a "who is running
@@ -34,8 +30,8 @@ def relevant(title, filters, source="?"):
     """
     if filters.no_filter or (RELEVANT.search(title) and ROLE.search(title)):
         return True
-    if filters.why:
-        _SKIPPED.append((source, title))
+    if filters.why and report is not None:
+        report.skipped(source, title)
     return False
 
 

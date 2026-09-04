@@ -17,15 +17,16 @@ KEYED = {
 }
 
 
-def need_keys(name, *env):
+def need_keys(name, *env, report=None):
     """Return the env values, or print why the source is unavailable."""
     vals = [os.environ.get(v, "").strip() for v in env]
     if all(vals):
         return vals
     missing = [v for v, got in zip(env, vals) if not got]
     want, how = KEYED[name]
-    print(f"[{name}] unavailable: set {want} to enable it "
-          f"({how}); missing {', '.join(missing)}")
+    if report is not None:
+        report.source(name, f"unavailable: set {want} to enable it "
+                            f"({how}); missing {', '.join(missing)}")
     return None
 
 

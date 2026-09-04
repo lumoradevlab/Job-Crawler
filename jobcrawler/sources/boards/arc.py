@@ -33,5 +33,5 @@ def crawl_arc(cfg, ctx):
                     posted, remote=True, us=status, query=q,
                 ))
                 found += 1
-        print(f'[arc] "{q}": {found} postings')
+        ctx.report.source("arc", f'"{q}": {found} postings')
     return jobs

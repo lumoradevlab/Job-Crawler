@@ -29,7 +29,7 @@ def crawl_himalayas(cfg, ctx):
             break
         for j in jobs:
             title = (j.get("title") or "").strip()
-            if not relevant(title, cfg.filters, "himalayas"):
+            if not relevant(title, cfg.filters, "himalayas", ctx.report):
                 continue
             fences = [str(x) for x in (j.get("locationRestrictions") or [])]
             label = ", ".join(fences) if fences else "Anywhere"
@@ -53,5 +53,5 @@ def crawl_himalayas(cfg, ctx):
         cursor = data.get("nextCursor")
         if not cursor:
             break
-    print(f"[himalayas] {len(out)} Android/mobile remote postings")
+    ctx.report.source("himalayas", f"{len(out)} Android/mobile remote postings")
     return out

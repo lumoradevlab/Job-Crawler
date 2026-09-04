@@ -18,7 +18,7 @@ HN_ITEM = "https://hacker-news.firebaseio.com/v0/item/{}.json"
 def crawl_hn(cfg, ctx):
     user = ctx.fetch.get_json("https://hacker-news.firebaseio.com/v0/user/whoishiring.json")
     if not user:
-        print("[hn] could not read the whoishiring user")
+        ctx.report.source("hn", "could not read the whoishiring user")
         return []
 
     thread = None
@@ -28,11 +28,11 @@ def crawl_hn(cfg, ctx):
             thread = item
             break
     if not thread:
-        print("[hn] no 'Who is hiring?' thread found")
+        ctx.report.source("hn", "no 'Who is hiring?' thread found")
         return []
 
     kids = thread.get("kids", [])
-    print(f"[hn] {thread.get('title')} — {len(kids)} top-level posts")
+    ctx.report.source("hn", f"{thread.get('title')} — {len(kids)} top-level posts")
 
     def one(cid):
         c = ctx.fetch.get_json(HN_ITEM.format(cid), tries=2) or {}
@@ -62,5 +62,5 @@ def crawl_hn(cfg, ctx):
             for res in ex.map(one, kids[i:i + 40]):
                 if res:
                     jobs.append(res)
-    print(f"  {len(jobs)} mention Android/mobile")
+    ctx.report.detail(f"{len(jobs)} mention Android/mobile")
     return jobs

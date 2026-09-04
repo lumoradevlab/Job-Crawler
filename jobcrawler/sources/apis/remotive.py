@@ -15,7 +15,7 @@ def crawl_remotive(cfg, ctx):
             {"search": query, "limit": 100}
         )
         rows = (ctx.fetch.get_json(url) or {}).get("jobs", [])
-        print(f'[remotive] "{query}" -> {len(rows)} raw')
+        ctx.report.source("remotive", f'"{query}" -> {len(rows)} raw')
         for j in rows:
             jid = str(j.get("id", ""))
             if jid in seen:

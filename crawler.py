@@ -40,11 +40,10 @@ import types
 from jobcrawler import cli, config, context, models
 from jobcrawler.cli import main
 from jobcrawler.filters import geo, rules, workplace
-from jobcrawler.filters.rules import _SKIPPED  # noqa: F401  — underscored
 from jobcrawler.net import http
 from jobcrawler.parse import dates, html, salary, text
 from jobcrawler.pipeline import dedupe
-from jobcrawler.report import writers
+from jobcrawler.report import events, writers
 from jobcrawler.sources import blocked, linkedin, registry
 from jobcrawler.sources.apis import arbeitnow, himalayas, remoteok, remotive
 from jobcrawler.sources.ats import (ashby, boards, discover, greenhouse, lever,
@@ -55,7 +54,7 @@ from jobcrawler.store import archive, seen
 
 # Order is only about which module a shared name is credited to; every
 # duplicate below is the same object imported twice, so nothing is shadowed.
-_REEXPORT = (http, html, text, salary, dates, config, context, models,
+_REEXPORT = (http, html, text, salary, dates, config, context, events, models,
              workplace, geo, rules,
              seen, archive, dedupe, writers, boards, linkedin, greenhouse,
              ashby, lever, workable, smartrecruiters, discover, builtin, arc,

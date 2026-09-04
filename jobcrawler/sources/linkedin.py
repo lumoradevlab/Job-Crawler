@@ -156,19 +156,19 @@ def crawl_linkedin(cfg, ctx):
         if cfg.level:
             params["f_E"] = EXPERIENCE[cfg.level]
 
-        print(f'[linkedin] query: "{query}"')
+        ctx.report.source("linkedin", f'query: "{query}"')
         for page in range(cfg.pages):
             params["start"] = page * 10
             html = ctx.fetch.get(LINKEDIN_SEARCH + "?" + urllib.parse.urlencode(params))
             if not html.strip():
-                print(f"  page {page + 1}: empty — end of this query")
+                ctx.report.detail(f"page {page + 1}: empty — end of this query")
                 break
 
             parser = JobCardParser()
             parser.feed(html)
             parser.close()
             if not parser.jobs:
-                print(f"  page {page + 1}: 0 cards — end of this query")
+                ctx.report.detail(f"page {page + 1}: 0 cards — end of this query")
                 break
 
             new = 0
@@ -182,17 +182,17 @@ def crawl_linkedin(cfg, ctx):
                     remote=True, query=query, job_id=card["job_id"],
                 ))
                 new += 1
-            print(f"  page {page + 1}: {len(parser.jobs)} cards, "
+            ctx.report.detail(f"page {page + 1}: {len(parser.jobs)} cards, "
                   f"+{new} new (running total {len(jobs)})")
 
     if cfg.details:
         # One request per posting, so only pay it for jobs we haven't read.
         known = ctx.seen_keys
         todo = [j for j in jobs if job_key(j) not in known]
-        print(f"[linkedin] fetching details for {len(todo)} new jobs "
+        ctx.report.source("linkedin", f"fetching details for {len(todo)} new jobs "
               f"(~{len(todo) * cfg.delay / 60:.0f} min)")
         for i, job in enumerate(todo, 1):
             job.update(linkedin_detail(job["job_id"], ctx))
             if i % 10 == 0:
-                print(f"  {i}/{len(todo)}")
+                ctx.report.detail(f"{i}/{len(todo)}")
     return jobs

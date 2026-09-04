@@ -26,5 +26,5 @@ def crawl_arbeitnow(cfg, ctx):
                 j.get("location") or "Remote", j.get("url", ""), posted,
                 remote=True, description=strip_tags(j.get("description", "")),
             ))
-    print(f"[arbeitnow] {len(out)} remote postings")
+    ctx.report.source("arbeitnow", f"{len(out)} remote postings")
     return out

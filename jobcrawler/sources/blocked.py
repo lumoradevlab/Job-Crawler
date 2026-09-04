@@ -14,6 +14,6 @@ BLOCKED = {
 
 def crawl_blocked(name):
     def _fn(cfg, ctx):
-        print(f"[{name}] unavailable: {BLOCKED[name]}")
+        ctx.report.source(name, f"unavailable: {BLOCKED[name]}")
         return []
     return _fn

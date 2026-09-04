@@ -15,7 +15,7 @@ JOOBLE_API = "https://jooble.org/api/{}"
 def crawl_jooble(cfg, ctx):
     """Jooble is an aggregator: its links point back at the board that
     originated the posting, so expect overlap with LinkedIn and Adzuna."""
-    keys = need_keys("jooble", "JOOBLE_KEY")
+    keys = need_keys("jooble", "JOOBLE_KEY", report=ctx.report)
     if not keys:
         return []
     key, = keys
@@ -31,7 +31,7 @@ def crawl_jooble(cfg, ctx):
         got = 0
         for j in data.get("jobs") or []:
             title = (j.get("title") or "").strip()
-            if not relevant(title, cfg.filters, "jooble"):
+            if not relevant(title, cfg.filters, "jooble", ctx.report):
                 continue
             label = j.get("location") or ""
             snippet = strip_tags(j.get("snippet") or "")
@@ -47,5 +47,5 @@ def crawl_jooble(cfg, ctx):
                 query=q,
             ))
             got += 1
-        print(f'[jooble] "{q}": {got} matches')
+        ctx.report.source("jooble", f'"{q}": {got} matches')
     return out

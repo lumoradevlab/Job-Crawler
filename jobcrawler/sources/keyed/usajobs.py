@@ -20,7 +20,7 @@ USAJOBS_SEARCH = ("https://data.usajobs.gov/api/search?Keyword={kw}"
 def crawl_usajobs(cfg, ctx):
     """Federal postings. Low volume for mobile work — single digits is normal
     — but every hit is genuinely remote-flagged and unambiguously US."""
-    keys = need_keys("usajobs", "USAJOBS_KEY", "USAJOBS_EMAIL")
+    keys = need_keys("usajobs", "USAJOBS_KEY", "USAJOBS_EMAIL", report=ctx.report)
     if not keys:
         return []
     key, email = keys
@@ -38,7 +38,7 @@ def crawl_usajobs(cfg, ctx):
         for it in items:
             j = it.get("MatchedObjectDescriptor") or {}
             title = (j.get("PositionTitle") or "").strip()
-            if not relevant(title, cfg.filters, "usajobs"):
+            if not relevant(title, cfg.filters, "usajobs", ctx.report):
                 continue
             locs = [l.get("LocationName", "")
                     for l in (j.get("PositionLocation") or [])]
@@ -62,5 +62,5 @@ def crawl_usajobs(cfg, ctx):
                 query=q,
             ))
             got += 1
-        print(f'[usajobs] "{q}": {got} matches')
+        ctx.report.source("usajobs", f'"{q}": {got} matches')
     return out

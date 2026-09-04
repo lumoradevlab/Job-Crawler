@@ -3,7 +3,6 @@
 import csv
 import json
 
-from ..filters.rules import _SKIPPED
 
 
 COLUMNS = ["source", "title", "company", "location", "us", "posted",
@@ -19,7 +18,7 @@ REJECTED_COLUMNS = ["source", "reason", "title", "company", "location",
                     "posted", "url"]
 
 
-def report_rejections(rejected, base):
+def report_rejections(rejected, base, skipped=(), report=None):
     """Write every dropped posting next to the rule that dropped it.
 
     The gate is otherwise silent, and silence is ambiguous: a run that
@@ -33,7 +32,7 @@ def report_rejections(rejected, base):
                                       "own title gate, before the main one",
              "title": title, "company": "", "location": "",
              "posted": "", "url": ""}
-            for src, title in _SKIPPED]
+            for src, title in skipped]
     rows += [dict({k: str(job.get(k, "") or "") for k in REJECTED_COLUMNS},
                   reason=why)
              for job, why in rejected]
@@ -51,14 +50,15 @@ def report_rejections(rejected, base):
         by_rule.setdefault(rule, {})
         by_rule[rule][r["source"]] = by_rule[rule].get(r["source"], 0) + 1
 
-    print(f"\n[why] {len(rows)} postings rejected "
-          f"({len(_SKIPPED)} of them by a source's own title gate)")
+    say = report.line if report is not None else print
+    say(f"\n[why] {len(rows)} postings rejected "
+        f"({len(skipped)} of them by a source's own title gate)")
     for rule, sources in sorted(by_rule.items(),
                                 key=lambda kv: -sum(kv[1].values())):
         top = ", ".join(f"{s} {n}" for s, n in
                         sorted(sources.items(), key=lambda kv: -kv[1])[:4])
-        print(f"  {rule:<13}{sum(sources.values()):>6}   {top}")
-    print(f"  -> {path}")
+        say(f"  {rule:<13}{sum(sources.values()):>6}   {top}")
+    say(f"  -> {path}")
 
 
 BOOKKEEPING = ("match_text", "gh_token", "gh_id", "sr_token", "sr_id")

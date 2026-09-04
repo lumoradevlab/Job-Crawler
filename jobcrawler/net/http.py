@@ -106,7 +106,8 @@ class Fetcher:
     """GET a URL, with retry, per-host pacing and failure accounting."""
 
     def __init__(self, tries=4, timeout=20, limiter=None, backoff=5.0,
-                 sleep=time.sleep, opener=None, context=None, stats=None):
+                 sleep=time.sleep, opener=None, context=None, stats=None,
+                 report=None):
         self.tries = tries
         self.timeout = timeout
         self.limiter = RateLimiter() if limiter is None else limiter
@@ -115,6 +116,10 @@ class Fetcher:
         self._sleep = sleep
         self._opener = opener or urllib.request.urlopen
         self._context = context
+        # A plain stderr print when nobody supplied a reporter, so a
+        # Fetcher built on its own still says when a request failed.
+        self._warn = report.warn if report is not None else (
+            lambda m: print(m, file=sys.stderr))
 
     # -- the two calls every source makes ---------------------------------
     def get(self, url, tries=None, timeout=None, headers=None):
@@ -136,8 +141,8 @@ class Fetcher:
                     return ""
                 if e.code in RETRY_CODES and attempt < tries:
                     wait = self.backoff * attempt + random.uniform(0, 2)
-                    print(f"  ! HTTP {e.code}, backing off {wait:.0f}s "
-                          f"(try {attempt}/{tries})", file=sys.stderr)
+                    self._warn(f"  ! HTTP {e.code}, backing off {wait:.0f}s "
+                               f"(try {attempt}/{tries})")
                     self._sleep(wait)
                     continue
                 self._fail(url, f"HTTP {e.code}", str(e), f"HTTP {e.code}")
@@ -210,7 +215,7 @@ class Fetcher:
         # `kind` groups the failure for the run summary; `show` is what the
         # old fetch() printed, kept verbatim because the SSL text it carries
         # is the part that tells you how to fix it.
-        print(f"  ! {show or kind} on {url}", file=sys.stderr)
+        self._warn(f"  ! {show or kind} on {url}")
         self.stats.record_failure(Failure(url, kind, detail))
 
 

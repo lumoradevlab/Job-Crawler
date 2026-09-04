@@ -48,5 +48,5 @@ def crawl_wwr(cfg, ctx):
                 tag("link"), posted, remote=True,
                 us=us_status(region + " " + body[:400]), description=body,
             ))
-        print(f"[wwr] {feed}: {len(items)} postings")
+        ctx.report.source("wwr", f"{feed}: {len(items)} postings")
     return jobs

@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Dict, Set
 
 from .net.http import Fetcher
+from .report.events import Reporter
 
 
 @dataclass
@@ -28,6 +29,9 @@ class RunContext:
     """The run's shared, mutable working state."""
 
     fetch: Fetcher = field(default_factory=Fetcher)
+
+    # Where progress goes, and the ledger of titles a source turned away.
+    report: Reporter = field(default_factory=Reporter)
     today: str = field(
         default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
 

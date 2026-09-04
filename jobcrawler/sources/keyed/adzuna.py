@@ -24,7 +24,7 @@ def crawl_adzuna(cfg, ctx):
     remote call is made the same way LinkedIn's is — from the words — and the
     REMOTE_STRONG gate does the deciding.
     """
-    keys = need_keys("adzuna", "ADZUNA_APP_ID", "ADZUNA_APP_KEY")
+    keys = need_keys("adzuna", "ADZUNA_APP_ID", "ADZUNA_APP_KEY", report=ctx.report)
     if not keys:
         return []
     app_id, app_key = keys
@@ -43,7 +43,7 @@ def crawl_adzuna(cfg, ctx):
             for j in results:
                 title = (j.get("title") or "").strip()
                 title = strip_tags(title)
-                if not relevant(title, cfg.filters, "adzuna"):
+                if not relevant(title, cfg.filters, "adzuna", ctx.report):
                     continue
                 body = strip_tags(j.get("description") or "")
                 label = (j.get("location") or {}).get("display_name", "")
@@ -71,5 +71,5 @@ def crawl_adzuna(cfg, ctx):
                 got += 1
             if len(results) < 50:
                 break
-        print(f'[adzuna] "{q}": {got} matches')
+        ctx.report.source("adzuna", f'"{q}": {got} matches')
     return out
