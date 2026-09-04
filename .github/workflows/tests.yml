@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The crawler is stdlib-only, so the matrix is about which Pythons
+        # and platforms it still parses and runs on, not about dependencies.
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.9", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run the suites
+        # Every test is offline by design — sources take an injected fetcher,
+        # so CI never touches a job board and never depends on one being up.
+        run: |
+          python test_crawler.py
+          python test_net.py
+          python test_pipeline.py
+
+      - name: The package imports and the CLI answers
+        run: |
+          python -c "import jobcrawler.cli"
+          python crawler.py --help > /dev/null
+          python -m jobcrawler --help > /dev/null
+
+      - name: Install as a package and run the console script
+        run: |
+          pip install .
+          jobcrawler --help > /dev/null
