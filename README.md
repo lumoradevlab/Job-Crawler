@@ -1,11 +1,28 @@
 # Remote Android/Mobile job crawler
 
 Collects **remote-in-the-USA** Android, Kotlin and mobile engineering job links
-from seven job boards in one pass. Python 3 stdlib only — nothing to install.
+from eighteen job boards in one pass. Python 3 stdlib only — no dependencies,
+now or later.
 
 ```bash
-cd ~/remote-job-crawler
-python3 crawler.py                    # 8 default queries, remote US, last 60 days
+git clone https://github.com/lumoradevlab/Job-Crawler
+cd Job-Crawler
+python3 crawler.py            # 8 default queries, remote US, last 60 days
+```
+
+Or install it, and get a `jobcrawler` command on your PATH:
+
+```bash
+pip install .
+jobcrawler --source greenhouse ashby
+```
+
+All three entry points are the same program:
+
+```bash
+python3 crawler.py --help     # from a clone
+python3 -m jobcrawler --help  # as a module
+jobcrawler --help             # installed
 ```
 
 Files written each run:
@@ -275,7 +292,7 @@ python3 crawler.py -k "Kotlin Developer" "Compose Developer" \
 | flag | meaning |
 |---|---|
 | `-k, --keywords` | search queries (default: 8 mobile/Android variants) |
-| `--source` | which boards to crawl (default: linkedin greenhouse ashby builtin arc wwr hn) |
+| `--source` | which boards to crawl (default: linkedin greenhouse ashby lever workable smartrecruiters himalayas adzuna usajobs builtin arc wwr hn) |
 | `-l, --location` | LinkedIn location, default `United States` |
 | `-p, --pages` | pages per query, 10 jobs each (default 5) |
 | `-d, --days` | only postings from the last N days, `0` = no limit (default 60) |
@@ -293,6 +310,7 @@ python3 crawler.py -k "Kotlin Developer" "Compose Developer" \
 | `--must` / `--exclude` | keyword filters |
 | `--no-filter` | keep every hit, skip the Android/mobile title gate |
 | `--why` | explain every rejection, and write `<out>_rejected.csv` |
+| `-q, --quiet` | drop the per-source progress; results and warnings still print |
 | `--strict-us` | require the posting to name the US (drops worldwide/unlabelled) |
 | `--anywhere` | switch the US gate off entirely |
 | `--delay` | seconds between LinkedIn requests, default 4 — **don't lower this** |
@@ -306,14 +324,26 @@ python3 crawler.py -k "Kotlin Developer" "Compose Developer" \
 ## Tests
 
 ```bash
-python3 test_crawler.py            # all of it, no network
+python3 test_crawler.py            # grading, parsing, stores
+python3 test_net.py                # retry, pacing, failure accounting
+python3 test_pipeline.py           # collect, select, the new/seen split
 python3 test_crawler.py -v         # naming each case
 python3 test_crawler.py TestKeep   # one class
 ```
 
-81 cases over the grading logic — `us_status()`, `keep()`, `parse_salary()`,
-`relative_date()` and the regexes behind them. All of it is pure functions, so
-the suite never touches the network and runs in well under a second.
+190 cases, none of which touch the network — the whole suite runs in well
+under a second, and CI never depends on a job board being up.
+
+That is possible because sources are handed their HTTP rather than importing
+it. A test constructs a `CrawlConfig` and a `RunContext` carrying a fetcher
+that serves recorded payloads, and calls the source directly:
+
+```python
+jobs = crawl_serpapi(make_cfg(), make_ctx(fetch=Recording()))
+```
+
+The largest group still covers the grading logic — `us_status()`, `keep()`,
+`parse_salary()`, `relative_date()` and the regexes behind them.
 
 This is where a regex tune proves it didn't break a case that used to work,
 which is worth more here than in most projects: nearly every decision the
@@ -426,6 +456,86 @@ counted here separately rather than being invisible.
 The reason to reach for this is the **`not-remote` and `onsite` rows**. That
 is the crawl's weakest call, and reading a few dozen of them is the cheap
 version of the hand-sampling described below.
+
+## Nothing comes back at all?
+
+If **every** source returns zero, the run will say so outright rather than
+letting `0 jobs` imply a quiet job market:
+
+```
+  !! every request failed: 46 of 46 (SSLCertVerificationError x46)
+     the run reached no board at all, so '0 jobs' above says nothing
+     about what is out there.
+     no CA certificates: run the Install Certificates command that ships
+     with python.org Python, or set SSL_CERT_FILE.
+```
+
+That specific failure is common on macOS and has nothing to do with the
+crawler. Python installed from python.org ships without a CA bundle and
+expects you to run its **Install Certificates.command** once; until you do,
+every HTTPS request in every Python program fails. Either run it:
+
+```bash
+/Applications/Python\ 3.12/Install\ Certificates.command
+```
+
+or, if that file isn't there, point Python at `certifi`'s bundle:
+
+```bash
+ln -s "$(python3 -c 'import certifi; print(certifi.where())')" \
+  /Library/Frameworks/Python.framework/Versions/3.12/etc/openssl/cert.pem
+```
+
+A partial failure is reported too — `12 of 46 requests failed (…)` — so a
+board that has changed its API or started blocking you is visible rather than
+looking like a week with no jobs.
+
+## Contributing
+
+The layout follows what a run does, so most changes have one obvious home:
+
+```
+jobcrawler/
+  cli.py            flags in, run out — the only module that reads argparse
+  config.py         CrawlConfig / FilterConfig: what was asked for
+  context.py        RunContext: the fetcher, reporter and state of one run
+  models.py         Posting — the record every source normalises into
+  net/              HTTP: retry, per-host pacing, failure accounting
+  parse/            markup, salary prose, relative dates
+  filters/          the gate: relevance, workplace, region
+  sources/          one module per board
+    ats/            company ATS boards, one driver + five specs
+  pipeline/         collect -> select -> split new from seen
+  store/            what a run remembers between runs
+  report/           the reporter, and the files a run writes
+```
+
+**Adding a source.** Write `crawl_x(cfg, ctx)` returning a list of `Posting`,
+and register it in `sources/registry.py` with a rank in `pipeline/dedupe.py`.
+Take HTTP from `ctx.fetch` and say things through `ctx.report` — never
+`print` or `urllib` directly, or your source is invisible to `--quiet`,
+absent from the failure accounting, and untestable offline.
+
+**Adding a company ATS** is smaller: the five existing ones share one crawl
+loop, so a sixth is a `BoardSpec` saying where to ask and how to read a
+posting, not a sixth copy of the loop. `--discover` picks it up automatically.
+
+**Using it as a library.** `jobcrawler/__init__.py` lists the public API.
+A source needs a config and a context and nothing else — no argparse, and no
+network unless you hand it a real fetcher:
+
+```python
+from jobcrawler import CrawlConfig, RunContext, NullReporter
+from jobcrawler.sources.registry import SOURCES
+
+cfg = CrawlConfig(boards={"greenhouse": ("stripe",)})
+postings = SOURCES["greenhouse"](cfg, RunContext(report=NullReporter()))
+```
+
+**Tests are the contract.** The grading rules are nearly all regexes tuned
+against whatever boards happened to return that week, so a change that looks
+obviously right is exactly the kind that quietly loses 19% of results. Add
+the case that proves your change, and run all three suites.
 
 ## Notes and limits
 

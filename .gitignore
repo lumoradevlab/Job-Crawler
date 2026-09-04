@@ -1,8 +1,13 @@
-# Crawl results and run history — regenerated on every run, not source
+# Crawl output and run history — regenerated on every run, not source.
+# The names follow --out, which defaults to android_remote_jobs.
 *.csv
 *.json
 *.jsonl
 *_links.txt
+
+# ...but these are source, and the blanket rules above would swallow them.
+!tests/**/*.json
+!.github/**/*.json
 
 # macOS
 .DS_Store
@@ -10,3 +15,8 @@
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+venv/

@@ -1,0 +1,360 @@
+"""The command line: parse the flags, then run the pipeline."""
+
+import argparse
+from datetime import datetime
+
+from .config import CrawlConfig, FilterConfig
+from .context import RunContext
+from .filters.geo import us_status
+from .filters.rules import rejection
+from .net.http import Fetcher
+from .net.ratelimit import HostPolicy, RateLimiter
+from .models import row  # noqa: F401  (kept on the module for the shim)
+from .pipeline.collect import collect
+from .pipeline.dedupe import SOURCE_RANK, dedupe_key
+from .pipeline.select import SALARY_FIELDS, select, split_new
+from .report.events import Reporter
+from .report.writers import report_rejections, write_outputs
+from .sources.ats.discover import discover_boards
+from .sources.linkedin import EXPERIENCE
+from .sources.registry import DEFAULT_SOURCES, SOURCES
+from .store.archive import Archive
+from .store.seen import (META, catchup_days, job_key, load_state,
+                         record_run, save_state)
+
+
+DEFAULT_QUERIES = [
+    "Android Developer",
+    "Android Engineer",
+    "Mobile Developer",
+    "Mobile Engineer",
+    "Android Software Engineer",
+    "Kotlin Developer",
+    "Mobile Software Engineer",
+    "Senior Android Developer",
+]
+
+
+def build(args, report, days, today, state, boards_found):
+    """Turn the parsed flags into the two objects a source is handed.
+
+    This is the only place that reads an argparse Namespace. Everything
+    downstream takes a CrawlConfig and a RunContext, which is what lets a
+    source be called from a test with two small objects and no CLI at all.
+    """
+    filters = FilterConfig(
+        no_filter=args.no_filter,
+        must=tuple(args.must) if args.must else None,
+        exclude=tuple(args.exclude) if args.exclude else None,
+        easy_apply_only=args.easy_apply_only,
+        anywhere=args.anywhere,
+        strict_us=args.strict_us,
+        days=days,
+        why=args.why,
+        min_salary=args.min_salary,
+    )
+    cfg = CrawlConfig(
+        keywords=tuple(args.keywords),
+        sources=tuple(args.source),
+        location=args.location,
+        pages=args.pages,
+        days=days,
+        level=args.level,
+        delay=args.delay,
+        details=args.details,
+        discover=args.discover,
+        boards={"greenhouse": tuple(args.boards or ()),
+                "ashby": tuple(args.ashby_boards or ()),
+                "lever": tuple(args.lever_boards or ()),
+                "workable": tuple(args.workable_boards or ()),
+                "smartrecruiters": tuple(args.sr_boards or ())},
+        filters=filters,
+    )
+
+    # --delay is LinkedIn's pacing and always was; it now reaches the request
+    # layer as that host's policy instead of a sleep at the bottom of a loop.
+    limiter = RateLimiter()
+    limiter.set_policy("www.linkedin.com",
+                       HostPolicy(gap=cfg.delay, jitter=1.5))
+    ctx = RunContext(
+        fetch=Fetcher(limiter=limiter, report=report),
+        report=report,
+        today=today,
+        seen_keys=set() if args.include_seen else {k for k in state
+                                                  if k != META},
+        boards_found=boards_found,
+    )
+    return cfg, ctx
+
+
+def report_network(stats, kept, report):
+    """Say what the network did, so an empty run is never ambiguous.
+
+    A crawler that reports "0 jobs" after every single request failed is
+    stating a fact about the job market it has no evidence for. The blackout
+    line exists because that exact wrong answer cost an afternoon: a Mac with
+    no CA bundle failed 46 of 46 requests and reported a quiet week.
+    """
+    if not stats.requests:
+        return
+    if stats.total_blackout():
+        kinds = ", ".join(f"{k} x{n}" for k, n in
+                          sorted(stats.by_kind().items(), key=lambda kv: -kv[1]))
+        report.warn(f"\n  !! every request failed: {stats.requests} of "
+                    f"{stats.requests} ({kinds})")
+        report.warn("     the run reached no board at all, so '0 jobs' above "
+                    "says nothing about what is out there.")
+        if "SSLCertVerificationError" in stats.by_kind():
+            report.warn("     no CA certificates: run the Install Certificates "
+                        "command that ships with python.org Python, or set "
+                        "SSL_CERT_FILE.")
+    elif stats.failed:
+        hosts = ", ".join(f"{h} {n}" for h, n in
+                          sorted(stats.by_host().items(), key=lambda kv: -kv[1])[:3])
+        report.detail(f"{stats.failed} of {stats.requests} requests failed "
+                      f"({hosts})"
+                      + ("; some boards were not read" if not kept else ""))
+
+
+def parser():
+    """The command line. Split out so main() shows the run,
+    not 115 lines of flag declarations."""
+    p = argparse.ArgumentParser(
+        description="Crawl remote Android/mobile jobs across every reachable "
+                    "board. US-only unless told otherwise.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  # every working source, remote in the US, last 60 days;
+  # later runs only catch up on what's new
+  python3 crawler.py
+
+  # strict US — drop "Worldwide"/"Anywhere" and unlabelled postings
+  python3 crawler.py --strict-us
+
+  # deep sweep with Easy Apply flags (slow: one request per LinkedIn job)
+  python3 crawler.py --days 30 --pages 10 --details
+
+  # company ATS boards only — the highest-signal source
+  python3 crawler.py --source greenhouse ashby
+  python3 crawler.py --source greenhouse --boards stripe figma discord
+  python3 crawler.py --source ashby --ashby-boards notion strava plaid
+
+  # skip LinkedIn entirely
+  python3 crawler.py --source greenhouse arc wwr hn
+
+  # only the LinkedIn Easy Apply jobs
+  python3 crawler.py --source linkedin --details --easy-apply-only
+
+  # your own queries, drop lead/manager titles
+  python3 crawler.py -k "Kotlin Developer" "Compose Developer" \\
+      --exclude "tech lead" manager
+
+  # why can't it read Indeed?
+  python3 crawler.py --source indeed
+
+  # go worldwide again
+  python3 crawler.py --anywhere
+""",
+    )
+    p.add_argument("-k", "--keywords", nargs="+", default=DEFAULT_QUERIES,
+                   metavar="QUERY",
+                   help="search queries (default: %d mobile/Android variants)"
+                        % len(DEFAULT_QUERIES))
+    p.add_argument("--source", nargs="+", default=DEFAULT_SOURCES,
+                   choices=sorted(SOURCES),
+                   help="default: " + " ".join(DEFAULT_SOURCES))
+    p.add_argument("-l", "--location", default="United States",
+                   help='LinkedIn location (default "United States"; '
+                        '"Worldwide" and "USA" are also resolved exactly)')
+    p.add_argument("-p", "--pages", type=int, default=5,
+                   help="LinkedIn pages per query, 10 jobs each (default 5)")
+    p.add_argument("-d", "--days", type=int, default=60,
+                   help="only postings from the last N days (0 = no limit). "
+                        "After the first run the window shrinks to the gap "
+                        "since that run — see --full")
+    p.add_argument("--full", action="store_true",
+                   help="re-sweep the whole --days window instead of only "
+                        "catching up since the last run")
+    p.add_argument("--level", choices=sorted(EXPERIENCE),
+                   help="experience level filter (LinkedIn only)")
+    p.add_argument("--boards", nargs="+", metavar="TOKEN",
+                   help="override the Greenhouse company list")
+    p.add_argument("--ashby-boards", nargs="+", metavar="TOKEN",
+                   help="override the Ashby company list")
+    p.add_argument("--lever-boards", nargs="+", metavar="TOKEN",
+                   help="override the Lever company list")
+    p.add_argument("--workable-boards", nargs="+", metavar="TOKEN",
+                   help="override the Workable company list")
+    p.add_argument("--sr-boards", nargs="+", metavar="TOKEN",
+                   help="override the SmartRecruiters company list")
+    p.add_argument("--discover", action="store_true",
+                   help="after crawling, probe every company name found "
+                        "against all five ATSes and remember the boards that "
+                        "answer; they join the lists from the next run on")
+    p.add_argument("--min-salary", type=int, metavar="N",
+                   help="drop postings whose stated pay is below N "
+                        "(postings that state no pay are kept)")
+    p.add_argument("--details", action="store_true",
+                   help="fetch each LinkedIn posting: description + Easy Apply")
+    p.add_argument("--easy-apply-only", action="store_true",
+                   help="keep only LinkedIn Easy Apply jobs (needs --details)")
+    p.add_argument("--must", nargs="+", metavar="WORD",
+                   help="keep only jobs containing all of these words")
+    p.add_argument("--exclude", nargs="+", metavar="WORD",
+                   help="drop jobs whose title contains any of these")
+    p.add_argument("--why", action="store_true",
+                   help="explain the rejections: a breakdown by rule and "
+                        "source, and <out>_rejected.csv naming the rule "
+                        "that dropped each posting")
+    p.add_argument("--no-filter", action="store_true",
+                   help="skip the Android/mobile title gate, keep every hit")
+    p.add_argument("--strict-us", action="store_true",
+                   help="require the posting to name the US; drops "
+                        '"Worldwide"/"Anywhere" and unlabelled listings')
+    p.add_argument("--anywhere", action="store_true",
+                   help="turn the US gate off entirely (worldwide results)")
+    p.add_argument("--delay", type=float, default=4.0,
+                   help="seconds between LinkedIn requests (default 4)")
+    p.add_argument("-o", "--out", default="android_remote_jobs",
+                   help="output basename (.csv, .json and _links.txt)")
+    p.add_argument("--no-archive", action="store_true",
+                   help="do not append this run's matches to "
+                        "<out>_archive.jsonl (the archive is the only full "
+                        "record; the .csv holds just this run)")
+    p.add_argument("--replay", action="store_true",
+                   help="rebuild the outputs from <out>_archive.jsonl instead "
+                        "of crawling — re-filter everything ever matched with "
+                        "no network at all, e.g. --replay --days 30")
+    p.add_argument("--include-seen", action="store_true",
+                   help="report every match, not just ones new since the "
+                        "last run")
+    p.add_argument("--reset-seen", action="store_true",
+                   help="forget the run history and start counting again")
+    p.add_argument("-q", "--quiet", action="store_true",
+                   help="print only the results and any warnings — for cron, "
+                        "where the per-source progress is just noise")
+    p.add_argument("--state", metavar="FILE",
+                   help="seen-job history file (default <out>_seen.json)")
+    return p
+
+
+def main():
+    args = parser().parse_args()
+    report = Reporter(quiet=args.quiet)
+    state_path = args.state or (args.out + "_seen.json")
+
+    # --anywhere with the default location would still pin LinkedIn to the US.
+    if args.anywhere and args.location == "United States":
+        args.location = "Worldwide"
+
+    # Load the history before crawling, so the sources can narrow their own
+    # work: a shorter date window, and no detail fetches for known jobs.
+    state = {} if args.reset_seen else load_state(state_path)
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Boards --discover has found on earlier runs, merged into the built-in
+    # lists by board_list() before any ATS source starts listing.
+    boards_path = args.out + "_boards.json"
+    boards = load_state(boards_path)
+    boards_found = boards.get("found", {})
+    grown = sum(len(v) for v in boards_found.values())
+    if grown:
+        report.line(f"{grown} discovered board{'' if grown == 1 else 's'} "
+                    f"from {boards_path}")
+
+    days = args.days
+    # A replay re-filters what is already on disk; narrowing the window to
+    # "since the last run" would silently hide almost all of it.
+    if not args.full and args.days and not args.replay:
+        narrowed = catchup_days(state, args.days, today, args.source)
+        if narrowed != args.days:
+            report.line(f"catching up: asking for the last {narrowed} days "
+                        f"instead of {args.days} (last run "
+                        f"{state[META]['last_run']}); --full re-sweeps it all")
+            days = narrowed
+
+    cfg, ctx = build(args, report, days, today, state, boards_found)
+    filters = cfg.filters
+
+    archive = Archive(args.out + "_archive.jsonl")
+
+    succeeded = set()
+    if args.replay:
+        # Re-filtering what is already on disk, so every gate still applies
+        # but nothing is fetched. Reporting only what is "new" would return
+        # nothing at all here, since the archive is by definition seen.
+        collected = archive.postings()
+        args.include_seen = True
+        ctx.seen_keys = set()
+        report.line(f"replaying {len(collected)} archived postings from "
+                    f"{archive.path} — nothing will be fetched")
+    else:
+        outcome = collect(cfg, ctx, SOURCES)
+        collected, succeeded = outcome.postings, outcome.succeeded
+
+    # Every result names a company, and a company name is a candidate ATS
+    # slug — so this run's aggregator hits become next run's board list.
+    if args.discover and not args.replay:
+        names = [j.company for j in collected]
+        names += [v.get("company", "") for k, v in state.items()
+                  if k != META and isinstance(v, dict)]
+        discover_boards(names, boards, today, ctx)
+        boards[META] = {"last_run": today}
+        save_state(boards_path, boards)
+
+    jobs, rejected = select(collected, filters, filters.why)
+
+    fresh = split_new(jobs, state, today)
+    total_matched = len(jobs)
+
+    # Everything matched, before the split below narrows the report to what
+    # is new — that split is a reporting choice, not a reason to lose data.
+    archived = 0
+    if not (args.no_archive or args.replay):
+        archived = archive.add(jobs)
+
+    if not args.replay:
+        for j in jobs:
+            state[job_key(j)] = {"first_seen": j.first_seen,
+                                 "title": j.title, "company": j.company}
+        # Only the sources that actually worked advance their clock; see
+        # catchup_days() for what advancing a failed source's clock costs.
+        record_run(state, today, cfg.days, succeeded)
+        save_state(state_path, state)
+
+    if not args.include_seen:
+        jobs = fresh
+
+    write_outputs(jobs, args.out)
+
+    by_source = {}
+    for j in jobs:
+        by_source[j.source] = by_source.get(j.source, 0) + 1
+
+    seen_before = total_matched - len(fresh)
+    ctx.report.result(f"\n{len(jobs)} jobs -> {args.out}.csv / .json / _links.txt")
+    ctx.report.result(f"  {len(fresh)} new since the last run, {seen_before} "
+                      f"already reported ({total_matched} matched in total)")
+    if archived:
+        ctx.report.result(f"  {archived} appended to {archive.path}")
+    if by_source:
+        ctx.report.result("  " + ", ".join(f"{k}: {v}"
+                                           for k, v in sorted(by_source.items())))
+    if jobs and not args.anywhere:
+        named = sum(1 for j in jobs if j.us == "us")
+        ctx.report.result(f"  {named} name a US location, {len(jobs) - named} "
+                          f'are "worldwide"/unlabelled (--strict-us drops those)')
+    if args.details:
+        ctx.report.result(
+            f"  {sum(1 for j in jobs if j.easy_apply == 'yes')} are Easy Apply")
+    report_network(ctx.fetch.stats, len(jobs), ctx.report)
+    if filters.why:
+        report_rejections(rejected, args.out, ctx.report.skips,
+                          ctx.report)
+    ctx.report.result()
+
+    for j in jobs:
+        tag = {"yes": "[easy]", "no": "[site]"}.get(j.easy_apply, "")
+        ctx.report.result(f"{j.source:<11}{(j.posted or '?'):<12}"
+                          f"{j.title[:42]:<44}{j.company[:18]:<20}"
+                          f"{tag:<7}{j.url}")
