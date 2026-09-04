@@ -6,16 +6,12 @@ from datetime import datetime, timedelta
 from html import unescape
 
 from ...parse.text import COMPANY_NOISE
-from .ashby import ASHBY_BOARDS, ASHBY_LIST
-from .greenhouse import GH_LIST, GREENHOUSE_BOARDS
-from .lever import LEVER_BOARDS, LEVER_LIST
-from .smartrecruiters import SMARTRECRUITERS_BOARDS
-from .workable import WORKABLE_BOARDS, WORKABLE_LIST
+from .driver import specs
 
 
 # The ATS sources are the highest-signal ones here and the hardest to grow:
 # there is no company index anywhere, so a slug is only reachable if you
-# already know the company uses that ATS, and every list above was built by
+# already know the company uses that ATS, and every built-in list was built by
 # hand-probing candidates and keeping whatever answered.
 #
 # But every aggregator result names a company. So the low-signal sources can
@@ -23,8 +19,11 @@ from .workable import WORKABLE_BOARDS, WORKABLE_LIST
 # and Adzuna turned up, normalise each name into the slugs an ATS might host
 # it under, and keep the ones that answer. That is --discover, and it means
 # the crawler grows its own best sources a little on every run.
-
-SR_PROBE = "https://api.smartrecruiters.com/v1/companies/{}/postings?limit=1"
+#
+# All of it is read off the same BoardSpecs the crawlers use. This used to be
+# a second table naming all five endpoints again, which is precisely the kind
+# of copy that goes stale the first time an ATS changes a URL.
+SPECS = {s.name: s for s in specs()}
 
 # The only proof a slug is real is that it answers with at least one live job.
 # Greenhouse, Ashby, Lever and Workable all 404 an unknown slug; SmartRecruiters
@@ -32,24 +31,12 @@ SR_PROBE = "https://api.smartrecruiters.com/v1/companies/{}/postings?limit=1"
 # looks exactly like a typo on every one of them, so "has jobs" is the rule
 # either way — and a miss is re-probed after DISCOVER_RETRY_DAYS, which is what
 # turns a company that was between postings back into a board.
-BOARD_PROBES = {
-    "greenhouse": (GH_LIST, lambda d: (d or {}).get("jobs")),
-    "lever": (LEVER_LIST, lambda d: d if isinstance(d, list) else None),
-    "ashby": (ASHBY_LIST, lambda d: (d or {}).get("jobs")),
-    "workable": (WORKABLE_LIST, lambda d: (d or {}).get("jobs")),
-    "smartrecruiters": (SR_PROBE, lambda d: (d or {}).get("content")),
-}
-BUILTIN_BOARDS = {
-    "greenhouse": GREENHOUSE_BOARDS,
-    "lever": LEVER_BOARDS,
-    "ashby": ASHBY_BOARDS,
-    "workable": WORKABLE_BOARDS,
-    "smartrecruiters": SMARTRECRUITERS_BOARDS,
-}
+BOARD_PROBES = {name: (sp.probe_url or sp.list_url, sp.jobs_of)
+                for name, sp in SPECS.items()}
+BUILTIN_BOARDS = {name: list(sp.boards) for name, sp in SPECS.items()}
 
-# Probed in this order and stopped at the first hit: a company uses one ATS,
-# so recognising it on Greenhouse saves the other four requests.
-PROBE_ORDER = ["greenhouse", "lever", "ashby", "workable", "smartrecruiters"]
+# Probed in this order and stopped at the first hit.
+PROBE_ORDER = list(SPECS)
 
 DISCOVER_CAP = 150          # candidates per run; the rest wait for the next
 DISCOVER_RETRY_DAYS = 30    # how long a miss is remembered before re-probing
