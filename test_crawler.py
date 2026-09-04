@@ -811,6 +811,35 @@ class TestStripTags(unittest.TestCase):
         self.assertEqual(c.strip_tags("<p>hello   <b>world</b></p>"),
                          "hello world")
 
+    def test_a_body_that_is_escaped_markup_is_still_stripped(self):
+        # Greenhouse escapes its whole description, so the markup arrives as
+        # text about markup. Stripping tags first finds none, and the old
+        # unescape afterwards left literal <h2> in the CSV.
+        # A heading does not break the line here, exactly as a real <h2>
+        # does not — only </p>, </li>, </ul> and </div> do. The point of the
+        # case is that no markup survives into the text.
+        self.assertEqual(
+            c.strip_tags("&lt;h2&gt;Who we are&lt;/h2&gt;&lt;p&gt;Hi&lt;/p&gt;"),
+            "Who we are Hi")
+        self.assertEqual(c.strip_tags("<h2>Who we are</h2><p>Hi</p>"),
+                         "Who we are Hi")
+
+    def test_escaped_generics_are_not_mistaken_for_markup(self):
+        # The reason escaped markup is handled by an allowlist of tag names
+        # rather than by unescaping everything first: these are Android job
+        # descriptions, and unescaping first turns this into "Flow >".
+        self.assertEqual(
+            c.strip_tags("Flow&lt;List&lt;User&gt;&gt; and LiveData&lt;T&gt;"),
+            "Flow<List<User>> and LiveData<T>")
+
+    def test_an_escaped_tag_may_carry_an_entity_in_an_attribute(self):
+        self.assertEqual(c.strip_tags('&lt;a href="a&amp;b"&gt;text&lt;/a&gt;'),
+                         "text")
+
+    def test_comparisons_in_prose_survive(self):
+        self.assertEqual(c.strip_tags("scale 3 &lt; 5 and A &amp; B"),
+                         "scale 3 < 5 and A & B")
+
 
 class TestAshbyPlaces(unittest.TestCase):
     """A posting headquartered in New York but open to Remote (US) carries
