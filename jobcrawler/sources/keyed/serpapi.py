@@ -97,7 +97,6 @@ def crawl_serpapi(args):
             token = (data.get("serpapi_pagination") or {}).get("next_page_token")
             if not token:
                 break
-            time.sleep(1)
         print(f'[serpapi] "{q}": {got} matches')
     print(f"  {len(out)} postings, {spent} SerpApi search"
           f"{'' if spent == 1 else 'es'} spent (free tier is 250 a month)")

@@ -185,7 +185,6 @@ def crawl_linkedin(args):
                 new += 1
             print(f"  page {page + 1}: {len(parser.jobs)} cards, "
                   f"+{new} new (running total {len(jobs)})")
-            time.sleep(args.delay + random.uniform(0, 1.5))
 
     if args.details:
         # One request per posting, so only pay it for jobs we haven't read.
@@ -197,5 +196,4 @@ def crawl_linkedin(args):
             job.update(linkedin_detail(job["job_id"]))
             if i % 10 == 0:
                 print(f"  {i}/{len(todo)}")
-            time.sleep(args.delay + random.uniform(0, 1.5))
     return jobs

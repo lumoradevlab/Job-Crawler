@@ -29,5 +29,4 @@ def crawl_remotive(args):
                 remote=True, description=strip_tags(j.get("description", "")),
                 query=query,
             ))
-        time.sleep(1)
     return out

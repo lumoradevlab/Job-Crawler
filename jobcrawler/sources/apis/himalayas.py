@@ -54,6 +54,5 @@ def crawl_himalayas(args):
         cursor = data.get("nextCursor")
         if not cursor:
             break
-        time.sleep(1)
     print(f"[himalayas] {len(out)} Android/mobile remote postings")
     return out

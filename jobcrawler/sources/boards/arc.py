@@ -35,5 +35,4 @@ def crawl_arc(args):
                 ))
                 found += 1
         print(f'[arc] "{q}": {found} postings')
-        time.sleep(1)
     return jobs

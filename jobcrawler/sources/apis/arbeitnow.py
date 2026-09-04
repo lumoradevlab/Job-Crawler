@@ -27,6 +27,5 @@ def crawl_arbeitnow(args):
                 j.get("location") or "Remote", j.get("url", ""), posted,
                 remote=True, description=strip_tags(j.get("description", "")),
             ))
-        time.sleep(1)
     print(f"[arbeitnow] {len(out)} remote postings")
     return out

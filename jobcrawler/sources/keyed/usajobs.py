@@ -64,5 +64,4 @@ def crawl_usajobs(args):
             ))
             got += 1
         print(f'[usajobs] "{q}": {got} matches')
-        time.sleep(1)
     return out

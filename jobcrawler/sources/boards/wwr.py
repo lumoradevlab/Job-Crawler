@@ -50,5 +50,4 @@ def crawl_wwr(args):
                 us=us_status(region + " " + body[:400]), description=body,
             ))
         print(f"[wwr] {feed}: {len(items)} postings")
-        time.sleep(1)
     return jobs

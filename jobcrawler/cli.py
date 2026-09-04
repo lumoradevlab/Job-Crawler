@@ -6,6 +6,8 @@ from datetime import datetime
 
 from .filters.geo import us_status
 from .filters.rules import rejection
+from .net import http
+from .net.ratelimit import HostPolicy
 from .models import row  # noqa: F401  (kept on the module for the shim)
 from .pipeline.dedupe import SOURCE_RANK, dedupe_key
 from .report.writers import (SALARY_FIELDS, report_rejections,
@@ -27,6 +29,34 @@ DEFAULT_QUERIES = [
     "Mobile Software Engineer",
     "Senior Android Developer",
 ]
+
+
+def report_network(stats, kept):
+    """Say what the network did, so an empty run is never ambiguous.
+
+    A crawler that reports "0 jobs" after every single request failed is
+    stating a fact about the job market it has no evidence for. The blackout
+    line exists because that exact wrong answer cost an afternoon: a Mac with
+    no CA bundle failed 46 of 46 requests and reported a quiet week.
+    """
+    if not stats.requests:
+        return
+    if stats.total_blackout():
+        kinds = ", ".join(f"{k} x{n}" for k, n in
+                          sorted(stats.by_kind().items(), key=lambda kv: -kv[1]))
+        print(f"\n  !! every request failed: {stats.requests} of "
+              f"{stats.requests} ({kinds})", file=sys.stderr)
+        print("     the run reached no board at all, so '0 jobs' above says "
+              "nothing about what is out there.", file=sys.stderr)
+        if "SSLCertVerificationError" in stats.by_kind():
+            print("     no CA certificates: run the Install Certificates "
+                  "command that ships with python.org Python, or set "
+                  "SSL_CERT_FILE.", file=sys.stderr)
+    elif stats.failed:
+        hosts = ", ".join(f"{h} {n}" for h, n in
+                          sorted(stats.by_host().items(), key=lambda kv: -kv[1])[:3])
+        print(f"  {stats.failed} of {stats.requests} requests failed "
+              f"({hosts})" + ("; some boards were not read" if not kept else ""))
 
 
 def main():
@@ -149,6 +179,11 @@ def main():
     # --anywhere with the default location would still pin LinkedIn to the US.
     if args.anywhere and args.location == "United States":
         args.location = "Worldwide"
+
+    # --delay is LinkedIn's pacing and always was; it now reaches the request
+    # layer as that host's policy instead of a sleep at the bottom of a loop.
+    http.DEFAULT.limiter.set_policy(
+        "www.linkedin.com", HostPolicy(gap=args.delay, jitter=1.5))
 
     # Load the history before crawling, so the sources can narrow their own
     # work: a shorter date window, and no detail fetches for known jobs.
@@ -297,6 +332,7 @@ def main():
               f'"worldwide"/unlabelled (use --strict-us to drop those)')
     if args.details:
         print(f"  {sum(1 for j in jobs if j['easy_apply'] == 'yes')} are Easy Apply")
+    report_network(http.DEFAULT.stats, len(jobs))
     if args.why:
         report_rejections(rejected, args.out)
     print()

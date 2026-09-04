@@ -63,6 +63,5 @@ def crawl_hn(args):
             for res in ex.map(one, kids[i:i + 40]):
                 if res:
                     jobs.append(res)
-            time.sleep(1.0)
     print(f"  {len(jobs)} mention Android/mobile")
     return jobs

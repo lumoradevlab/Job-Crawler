@@ -1,15 +1,10 @@
 """Jooble — an aggregator, reached by POSTing a JSON query."""
 
-import json
-import sys
-import time
-import urllib.request
-
 from ...filters.geo import us_status
 from ...filters.rules import relevant
 from ...filters.workplace import REMOTE_HINT, REMOTE_STRONG
 from ...models import row
-from ...net.http import UA
+from ...net.http import post_json
 from ...parse.html import strip_tags
 from ...parse.salary import parse_salary
 from .base import need_keys
@@ -29,17 +24,10 @@ def crawl_jooble(args):
     for q in args.keywords:
         # Jooble has no remote field and no remote filter, so — as with
         # Adzuna — the word goes in the query and REMOTE_STRONG decides.
-        body = json.dumps({"keywords": q + " remote",
-                           "location": args.location,
-                           "page": "1"}).encode("utf-8")
-        req = urllib.request.Request(
-            JOOBLE_API.format(key), data=body,
-            headers={"Content-Type": "application/json", "User-Agent": UA})
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="replace"))
-        except Exception as e:
-            print(f"  ! jooble {type(e).__name__}: {e}", file=sys.stderr)
+        data = post_json(JOOBLE_API.format(key),
+                         {"keywords": q + " remote",
+                          "location": args.location, "page": "1"})
+        if data is None:
             continue
         got = 0
         for j in data.get("jobs") or []:
@@ -61,5 +49,4 @@ def crawl_jooble(args):
             ))
             got += 1
         print(f'[jooble] "{q}": {got} matches')
-        time.sleep(1)
     return out

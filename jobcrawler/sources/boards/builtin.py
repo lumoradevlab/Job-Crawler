@@ -102,7 +102,6 @@ def crawl_builtin(args):
                     query=query,
                 ))
                 found += 1
-            time.sleep(1)
         print(f'[builtin] "{query}": {found} postings')
     print(f"  {sum(1 for j in jobs if j['remote'])} of {len(jobs)} are remote")
     return jobs

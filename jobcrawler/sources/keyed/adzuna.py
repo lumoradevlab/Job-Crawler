@@ -72,6 +72,5 @@ def crawl_adzuna(args):
                 got += 1
             if len(results) < 50:
                 break
-            time.sleep(1)
         print(f'[adzuna] "{q}": {got} matches')
     return out
