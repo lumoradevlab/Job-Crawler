@@ -45,9 +45,9 @@ def _merge(j, data):
     body = " ".join(
         strip_tags((ad.get(k) or {}).get("text") or "")
         for k in ("jobDescription", "qualifications", "companyDescription"))
-    j["description"] = body[:2000]
-    if not j["remote"]:
-        j["remote"] = bool(REMOTE_STRONG.search(body))
+    j.description = body[:2000]
+    if not j.remote:
+        j.remote = bool(REMOTE_STRONG.search(body))
 
 
 SMARTRECRUITERS = BoardSpec(
@@ -57,9 +57,8 @@ SMARTRECRUITERS = BoardSpec(
     jobs_of=lambda d: (d or {}).get("content") or [],
     title_of=lambda j: j.get("name") or "",
     to_posting=_posting,
-    detail_url=lambda j: SR_JOB.format(j["sr_token"], j["sr_id"]),
+    detail_url=lambda j: SR_JOB.format(j.ref["sr_token"], j.ref["sr_id"]),
     merge_detail=_merge,
-    ref_keys=("sr_token", "sr_id"),
     probe_url=SR_PROBE,
     paged=True,
 )

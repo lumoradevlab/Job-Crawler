@@ -48,16 +48,16 @@ def rejection(job, filters):
     the real ones. Every reason reads "<category>: <detail>"; the category is
     what the summary groups on, so keep those stable and the detail specific.
     """
-    title = job["title"]
+    title = job.title
     # Structured boards put the role in the title; free-text sources (HN)
     # bury it in the body, so they set match_text to widen the gate.
-    subject = job.get("match_text") or title
+    subject = job.ref.get("match_text") or title
 
     if not filters.no_filter and not (RELEVANT.search(subject)
                                    and ROLE.search(subject)):
         return "not-mobile: no Android/mobile role in the title"
     if filters.must:
-        hay = (title + " " + job.get("description", "")).lower()
+        hay = (title + " " + job.description).lower()
         absent = [w for w in filters.must if w.lower() not in hay]
         if absent:
             return "must: never says " + ", ".join(absent)
@@ -65,13 +65,13 @@ def rejection(job, filters):
         banned = [w for w in filters.exclude if w.lower() in title.lower()]
         if banned:
             return "exclude: title says " + ", ".join(banned)
-    if filters.easy_apply_only and job.get("easy_apply") != "yes":
+    if filters.easy_apply_only and job.easy_apply != "yes":
         return "easy-apply: not an Easy Apply posting"
-    if not job.get("remote"):
+    if not job.remote:
         return "not-remote: the source never flagged it remote"
     # A title that names the workplace outranks whatever the board's own
     # remote filter claimed — unless it offers both ("Remote or Hybrid").
-    where = title + " " + job.get("location", "")
+    where = title + " " + job.location
     split = HYBRID_SPLIT.search(where)
     if split:
         return "hybrid-split: %r is a week split with an office" % (
@@ -87,19 +87,19 @@ def rejection(job, filters):
             office.group(0).strip(),)
 
     if not filters.anywhere:
-        status = job.get("us") or us_status(job.get("location", ""))
+        status = job.us or us_status(job.location)
         if status == "no":
             return "region: fenced outside the US (%s)" % (
-                job.get("location") or "no location given",)
+                job.location or "no location given",)
         if filters.strict_us and status != "us":
             return "not-us: --strict-us, and the location reads %s" % status
 
-    if filters.days and job.get("posted"):
+    if filters.days and job.posted:
         try:
-            posted = datetime.strptime(job["posted"][:10], "%Y-%m-%d")
+            posted = datetime.strptime(job.posted[:10], "%Y-%m-%d")
             if posted < datetime.now() - timedelta(days=filters.days):
                 return "too-old: posted %s, window is %d days" % (
-                    job["posted"][:10], filters.days)
+                    job.posted[:10], filters.days)
         except ValueError:
             pass
     return None

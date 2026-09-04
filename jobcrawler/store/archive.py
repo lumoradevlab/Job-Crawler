@@ -2,6 +2,7 @@
 
 import json
 
+from ..models import Posting
 from .seen import job_key
 
 
@@ -15,7 +16,7 @@ def load_archive(path):
                 if not line:
                     continue
                 try:
-                    out.append(json.loads(line))
+                    out.append(Posting.from_record(json.loads(line)))
                 except json.JSONDecodeError:
                     continue        # a half-written line from a killed run
     except FileNotFoundError:
@@ -38,5 +39,6 @@ def append_archive(path, jobs):
     if added:
         with open(path, "a", encoding="utf-8") as fh:
             for j in added:
-                fh.write(json.dumps(j, ensure_ascii=False) + "\n")
+                fh.write(json.dumps(j.as_record(), ensure_ascii=False)
+                         + "\n")
     return len(added)

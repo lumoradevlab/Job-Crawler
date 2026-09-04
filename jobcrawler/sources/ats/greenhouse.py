@@ -36,13 +36,13 @@ def _merge(j, data):
     remote-eligible — Greenhouse keeps that detail in the body, which is why
     the matches pay for a second request at all."""
     body = strip_tags(data.get("content", ""))
-    j["description"] = body[:2000]
+    j.description = body[:2000]
     # The location field is the reliable signal; the body only counts if
     # it commits to remote in so many words.
-    j["remote"] = bool(REMOTE_HINT.search(j["location"])) or \
+    j.remote = bool(REMOTE_HINT.search(j.location)) or \
         bool(REMOTE_STRONG.search(body))
-    located = us_status(j["location"])
-    j["us"] = located if located != "unknown" else us_status(body[:1500])
+    located = us_status(j.location)
+    j.us = located if located != "unknown" else us_status(body[:1500])
 
 
 GREENHOUSE = BoardSpec(
@@ -52,9 +52,8 @@ GREENHOUSE = BoardSpec(
     jobs_of=lambda d: (d or {}).get("jobs") or [],
     title_of=lambda j: j.get("title", ""),
     to_posting=_posting,
-    detail_url=lambda j: GH_JOB.format(j["gh_token"], j["gh_id"]),
+    detail_url=lambda j: GH_JOB.format(j.ref["gh_token"], j.ref["gh_id"]),
     merge_detail=_merge,
-    ref_keys=("gh_token", "gh_id"),
 )
 
 crawl_greenhouse = make_source(GREENHOUSE)

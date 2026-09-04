@@ -192,7 +192,8 @@ def crawl_linkedin(cfg, ctx):
         ctx.report.source("linkedin", f"fetching details for {len(todo)} new jobs "
               f"(~{len(todo) * cfg.delay / 60:.0f} min)")
         for i, job in enumerate(todo, 1):
-            job.update(linkedin_detail(job["job_id"], ctx))
+            for k, v in linkedin_detail(job.ref["job_id"], ctx).items():
+                setattr(job, k, v)
             if i % 10 == 0:
                 ctx.report.detail(f"{i}/{len(todo)}")
     return jobs

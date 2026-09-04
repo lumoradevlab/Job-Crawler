@@ -13,7 +13,7 @@ from .models import row  # noqa: F401  (kept on the module for the shim)
 from .pipeline.dedupe import SOURCE_RANK, dedupe_key
 from .report.events import Reporter
 from .report.writers import (SALARY_FIELDS, report_rejections,
-                             strip_bookkeeping, write_outputs)
+                             write_outputs)
 from .sources.ats.discover import discover_boards
 from .sources.linkedin import EXPERIENCE
 from .sources.registry import DEFAULT_SOURCES, SOURCES
@@ -293,7 +293,7 @@ def main():
     # Every result names a company, and a company name is a candidate ATS
     # slug — so this run's aggregator hits become next run's board list.
     if args.discover and not args.replay:
-        names = [j["company"] for j in collected]
+        names = [j.company for j in collected]
         names += [v.get("company", "") for k, v in state.items()
                   if k != META and isinstance(v, dict)]
         discover_boards(names, boards, today, ctx)
@@ -312,39 +312,39 @@ def main():
             if filters.why:
                 rejected.append((j, why))
             continue
-        j["us"] = j.get("us") or us_status(j.get("location", ""))
+        j.us = j.us or us_status(j.location)
         key = dedupe_key(j)
         prior = best.get(key)
-        if prior is None or SOURCE_RANK.get(j["source"], 50) < \
-                SOURCE_RANK.get(prior["source"], 50):
+        if prior is None or SOURCE_RANK.get(j.source, 50) < \
+                SOURCE_RANK.get(prior.source, 50):
             # Keep any salary the loser knew and the winner doesn't.
-            if prior and prior.get("salary_min") and not j.get("salary_min"):
+            if prior and prior.salary_min and not j.salary_min:
                 for f in SALARY_FIELDS:
-                    j[f] = prior[f]
+                    setattr(j, f, getattr(prior, f))
             if prior is not None and filters.why:
                 rejected.append((prior, "duplicate: %s carries the same job "
-                                        "on a better link" % j["source"]))
+                                        "on a better link" % j.source))
             best[key] = j
         else:
-            if prior.get("salary_min") is None and j.get("salary_min"):
+            if prior.salary_min is None and j.salary_min:
                 for f in SALARY_FIELDS:
-                    prior[f] = j[f]
+                    setattr(prior, f, getattr(j, f))
             if filters.why:
                 rejected.append((j, "duplicate: kept the %s record instead"
-                                    % prior["source"]))
+                                    % prior.source))
     jobs = list(best.values())
 
     if filters.min_salary:
         jobs = [j for j in jobs
-                if not j.get("salary_max")
-                or (j.get("salary_max") or 0) >= filters.min_salary]
-    jobs.sort(key=lambda j: (j.get("posted") or "", j["source"]), reverse=True)
+                if not j.salary_max
+                or (j.salary_max or 0) >= filters.min_salary]
+    jobs.sort(key=lambda j: (j.posted, j.source), reverse=True)
 
     # Split into new vs already-reported, then remember everything we saw.
     fresh = []
     for j in jobs:
         prior = state.get(job_key(j))
-        j["first_seen"] = (prior or {}).get("first_seen", today)
+        j.first_seen = (prior or {}).get("first_seen", today)
         if prior is None:
             fresh.append(j)
     total_matched = len(jobs)
@@ -353,12 +353,12 @@ def main():
     # is new — that split is a reporting choice, not a reason to lose data.
     archived = 0
     if not (args.no_archive or args.replay):
-        archived = append_archive(archive_path, strip_bookkeeping(jobs))
+        archived = append_archive(archive_path, jobs)
 
     if not args.replay:
         for j in jobs:
-            state[job_key(j)] = {"first_seen": j["first_seen"],
-                                 "title": j["title"], "company": j["company"]}
+            state[job_key(j)] = {"first_seen": j.first_seen,
+                                 "title": j.title, "company": j.company}
         state[META] = {"last_run": today, "window_days": cfg.days}
         save_state(state_path, state)
 
@@ -369,7 +369,7 @@ def main():
 
     by_source = {}
     for j in jobs:
-        by_source[j["source"]] = by_source.get(j["source"], 0) + 1
+        by_source[j.source] = by_source.get(j.source, 0) + 1
 
     seen_before = total_matched - len(fresh)
     ctx.report.result(f"\n{len(jobs)} jobs -> {args.out}.csv / .json / _links.txt")
@@ -381,12 +381,12 @@ def main():
         ctx.report.result("  " + ", ".join(f"{k}: {v}"
                                            for k, v in sorted(by_source.items())))
     if jobs and not args.anywhere:
-        named = sum(1 for j in jobs if j["us"] == "us")
+        named = sum(1 for j in jobs if j.us == "us")
         ctx.report.result(f"  {named} name a US location, {len(jobs) - named} "
                           f'are "worldwide"/unlabelled (--strict-us drops those)')
     if args.details:
         ctx.report.result(
-            f"  {sum(1 for j in jobs if j['easy_apply'] == 'yes')} are Easy Apply")
+            f"  {sum(1 for j in jobs if j.easy_apply == 'yes')} are Easy Apply")
     report_network(ctx.fetch.stats, len(jobs), ctx.report)
     if filters.why:
         report_rejections(rejected, args.out, ctx.report.skips,
@@ -394,7 +394,7 @@ def main():
     ctx.report.result()
 
     for j in jobs:
-        tag = {"yes": "[easy]", "no": "[site]"}.get(j["easy_apply"], "")
-        ctx.report.result(f"{j['source']:<11}{(j['posted'] or '?'):<12}"
-                          f"{j['title'][:42]:<44}{j['company'][:18]:<20}"
-                          f"{tag:<7}{j['url']}")
+        tag = {"yes": "[easy]", "no": "[site]"}.get(j.easy_apply, "")
+        ctx.report.result(f"{j.source:<11}{(j.posted or '?'):<12}"
+                          f"{j.title[:42]:<44}{j.company[:18]:<20}"
+                          f"{tag:<7}{j.url}")

@@ -17,6 +17,7 @@ Stdlib only, like the crawler itself.
 import contextlib
 import csv
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -55,10 +56,18 @@ def _no_network(req, **kw):
 
 
 def make_job(**over):
-    """A record that passes every gate, so a test can spoil one field."""
+    """A record that passes every gate, so a test can spoil one field.
+
+    Overrides that name a declared field set it; anything else is per-source
+    scratch and lands in .ref, which is exactly where a Posting keeps it.
+    """
     job = c.row("greenhouse", "Senior Android Engineer", "Acme",
                 "Remote - US", "https://example.com/jobs/1", "2026-08-01")
-    job.update(over)
+    for key, value in over.items():
+        if hasattr(job, key):
+            setattr(job, key, value)
+        else:
+            job.ref[key] = value
     return job
 
 
@@ -416,7 +425,7 @@ class TestRejection(unittest.TestCase):
         for args in (make_args(), make_args(days=30), make_args(strict_us=True),
                      make_args(anywhere=True), make_args(no_filter=True)):
             for job in jobs:
-                with self.subTest(job=job["title"], args=vars(args)):
+                with self.subTest(job=job.title, args=vars(args)):
                     self.assertEqual(c.keep(job, args),
                                      c.rejection(job, args) is None)
 
@@ -633,12 +642,12 @@ class TestArchive(unittest.TestCase):
         c.append_archive(self.path, [make_job(url="https://x/1")])
         got = c.load_archive(self.path)
         self.assertEqual(len(got), 1)
-        self.assertEqual(got[0]["title"], "Senior Android Engineer")
+        self.assertEqual(got[0].title, "Senior Android Engineer")
 
     def test_appending_never_rewrites_what_is_there(self):
         c.append_archive(self.path, [make_job(url="https://x/1")])
         c.append_archive(self.path, [make_job(url="https://x/2")])
-        self.assertEqual([j["url"] for j in c.load_archive(self.path)],
+        self.assertEqual([j.url for j in c.load_archive(self.path)],
                          ["https://x/1", "https://x/2"])
 
     def test_a_posting_already_archived_is_not_added_twice(self):
@@ -653,16 +662,21 @@ class TestArchive(unittest.TestCase):
         with open(self.path, "a", encoding="utf-8") as fh:
             fh.write('{"url": "https://x/2", "ti\n')
         c.append_archive(self.path, [make_job(url="https://x/3")])
-        self.assertEqual([j["url"] for j in c.load_archive(self.path)],
+        self.assertEqual([j.url for j in c.load_archive(self.path)],
                          ["https://x/1", "https://x/3"])
 
-    def test_bookkeeping_fields_are_not_archived(self):
+    def test_scratch_fields_cannot_reach_the_archive(self):
+        # Per-source scratch lives in .ref, which as_record() never emits —
+        # so this holds for a field no one has invented yet, where the old
+        # hand-written BOOKKEEPING tuple only covered the five it listed.
         job = make_job(url="https://x/1", match_text="body", gh_token="stripe")
-        c.append_archive(self.path, c.strip_bookkeeping([job]))
-        stored, = c.load_archive(self.path)
-        self.assertNotIn("match_text", stored)
-        self.assertNotIn("gh_token", stored)
-        self.assertIn("title", stored)
+        c.append_archive(self.path, [job])
+        with open(self.path, encoding="utf-8") as fh:
+            written = json.loads(fh.readline())
+        self.assertNotIn("match_text", written)
+        self.assertNotIn("gh_token", written)
+        self.assertNotIn("ref", written)
+        self.assertIn("title", written)
 
     def test_the_archive_keeps_the_fields_the_seen_state_throws_away(self):
         # The point of the file: the seen-state remembers a title, a company
@@ -671,7 +685,8 @@ class TestArchive(unittest.TestCase):
             url="https://x/1", location="Remote - US", salary_min=180000)])
         stored, = c.load_archive(self.path)
         for field in ("location", "salary_min", "posted", "source", "url"):
-            self.assertIn(field, stored)
+            self.assertTrue(getattr(stored, field),
+                            f"{field} did not survive the archive")
 
 
 # ==========================================================================
@@ -680,7 +695,7 @@ class TestArchive(unittest.TestCase):
 class TestDedupeKey(unittest.TestCase):
 
     def key(self, title, company="Acme"):
-        return c.dedupe_key({"title": title, "company": company})
+        return c.dedupe_key(make_job(title=title, company=company))
 
     def same(self, a, b, company_a="Acme", company_b="Acme"):
         self.assertEqual(self.key(a, company_a), self.key(b, company_b))
@@ -942,7 +957,7 @@ class TestCrawlSerpApi(unittest.TestCase):
 
     def test_the_mobile_roles_are_kept_and_the_others_are_not(self):
         jobs, _ = self.crawl([self.SAMPLE])
-        self.assertEqual([j["title"] for j in jobs],
+        self.assertEqual([j.title for j in jobs],
                          ["Mobile Developer - iOS & Android (Remote)",
                           "Remote Android Developer"])
 
@@ -950,26 +965,26 @@ class TestCrawlSerpApi(unittest.TestCase):
         # The only source that states this structurally instead of leaving it
         # to be read out of prose.
         jobs, _ = self.crawl([self.SAMPLE])
-        self.assertTrue(all(j["remote"] for j in jobs))
+        self.assertTrue(all(j.remote for j in jobs))
 
     def test_the_posting_link_beats_the_google_redirect(self):
         jobs, _ = self.crawl([self.SAMPLE])
-        self.assertEqual(jobs[0]["url"],
+        self.assertEqual(jobs[0].url,
                          "https://www.careerbuilder.com/job-details/8b102674")
-        self.assertNotIn("google.com", jobs[0]["url"])
-        self.assertEqual(jobs[0]["apply_url"],
+        self.assertNotIn("google.com", jobs[0].url)
+        self.assertEqual(jobs[0].apply_url,
                          "https://www.careerbuilder.com/apply")
 
     def test_salary_and_date_come_off_detected_extensions(self):
         jobs, _ = self.crawl([self.SAMPLE])
-        self.assertEqual((jobs[1]["salary_min"], jobs[1]["salary_max"]),
+        self.assertEqual((jobs[1].salary_min, jobs[1].salary_max),
                          (84000, 96000))
-        self.assertEqual(jobs[1]["salary_currency"], "USD")
-        self.assertTrue(jobs[1]["posted"])          # "3 days ago" resolved
+        self.assertEqual(jobs[1].salary_currency, "USD")
+        self.assertTrue(jobs[1].posted)             # "3 days ago" resolved
 
     def test_anywhere_survives_the_gate_but_not_strict_us(self):
         jobs, _ = self.crawl([self.SAMPLE])
-        self.assertEqual(c.us_status(jobs[0]["location"]), "worldwide")
+        self.assertEqual(c.us_status(jobs[0].location), "worldwide")
         self.assertTrue(c.keep(jobs[0], make_args()))
         self.assertFalse(c.keep(jobs[0], make_args(strict_us=True)))
 
@@ -1174,9 +1189,17 @@ class TestWiring(unittest.TestCase):
                                 f"{ats} should outrank {agg}")
 
     def test_every_written_column_exists_on_a_record(self):
-        # first_seen is attached in main() after the gate, not by row().
-        self.assertEqual(set(c.COLUMNS) - set(c.row("x", "", "", "", ""))
-                         - {"first_seen"}, set())
+        self.assertEqual(set(c.COLUMNS) - set(c.RECORD_FIELDS), set())
+
+    def test_a_record_writes_no_field_the_columns_do_not_name(self):
+        # The other direction, which nothing checked before: a field added to
+        # Posting and forgotten in COLUMNS is silently dropped from every CSV
+        # the tool writes.
+        #
+        # "remote" is the one deliberate omission. Every posting that reaches
+        # an output file has passed the remote gate, so the column would read
+        # True on every row and say nothing.
+        self.assertEqual(set(c.RECORD_FIELDS) - set(c.COLUMNS), {"remote"})
 
     def test_board_lists_have_no_duplicates(self):
         for name in ("GREENHOUSE_BOARDS", "ASHBY_BOARDS", "LEVER_BOARDS",

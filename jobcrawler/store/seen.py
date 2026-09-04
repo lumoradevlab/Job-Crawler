@@ -10,11 +10,11 @@ from datetime import datetime
 def job_key(job):
     # Keep the query string: several boards carry the job id there
     # (…/jobs/?gh_jid=4916795), so stripping it merges unrelated postings.
-    url = (job.get("url") or "").strip().rstrip("/")
+    url = job.url.strip().rstrip("/")
     if url:
         return url
-    return "{}|{}|{}".format(job["source"], job["title"].lower().strip(),
-                             job["company"].lower().strip())
+    return "{}|{}|{}".format(job.source, job.title.lower().strip(),
+                             job.company.lower().strip())
 
 
 META = "_meta"  # run bookkeeping, stored alongside the seen jobs

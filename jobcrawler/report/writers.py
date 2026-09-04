@@ -33,8 +33,8 @@ def report_rejections(rejected, base, skipped=(), report=None):
              "title": title, "company": "", "location": "",
              "posted": "", "url": ""}
             for src, title in skipped]
-    rows += [dict({k: str(job.get(k, "") or "") for k in REJECTED_COLUMNS},
-                  reason=why)
+    rows += [dict({k: str(getattr(job, k, "") or "")
+                   for k in REJECTED_COLUMNS}, reason=why)
              for job, why in rejected]
 
     path = base + "_rejected.csv"
@@ -61,25 +61,21 @@ def report_rejections(rejected, base, skipped=(), report=None):
     say(f"  -> {path}")
 
 
-BOOKKEEPING = ("match_text", "gh_token", "gh_id", "sr_token", "sr_id")
-
-
-def strip_bookkeeping(jobs):
-    """Drop the per-source scratch fields; they are not worth writing out."""
-    for j in jobs:
-        for k in BOOKKEEPING:
-            j.pop(k, None)
-    return jobs
-
-
 def write_outputs(jobs, base):
-    strip_bookkeeping(jobs)
+    """Write the run's three files.
+
+    There is no scratch to strip on the way out any more: a Posting declares
+    its fields and keeps per-source working state in `ref`, which as_record()
+    does not emit. The old BOOKKEEPING tuple had to be kept in step with every
+    source by hand, and forgetting it put a stray column in someone's CSV.
+    """
+    records = [j.as_record() for j in jobs]
 
     with open(base + ".csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=COLUMNS, extrasaction="ignore")
         w.writeheader()
-        w.writerows(jobs)
+        w.writerows(records)
     with open(base + ".json", "w", encoding="utf-8") as fh:
-        json.dump(jobs, fh, indent=2, ensure_ascii=False)
+        json.dump(records, fh, indent=2, ensure_ascii=False)
     with open(base + "_links.txt", "w", encoding="utf-8") as fh:
-        fh.writelines(j["url"] + "\n" for j in jobs)
+        fh.writelines(j.url + "\n" for j in jobs)

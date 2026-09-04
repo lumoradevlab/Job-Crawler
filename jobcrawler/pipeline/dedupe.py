@@ -26,18 +26,18 @@ TITLE_SUFFIX = re.compile(
 
 def dedupe_key(job):
     """(title, company) reduced to what two sources would agree on."""
-    title = unescape(job.get("title") or "").strip()
+    title = unescape(job.title).strip()
     for _ in range(3):                    # "Android Engineer (Remote) - US"
         shorter = TITLE_SUFFIX.sub("", title).strip()
         if shorter == title or not shorter:
             break
         title = shorter
-    company = COMPANY_NOISE.sub(" ", unescape(job.get("company") or "").lower())
+    company = COMPANY_NOISE.sub(" ", unescape(job.company).lower())
     flat = lambda s: re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
     # Falling back to the raw field keeps a company literally called "Group"
     # from colliding with every other one that normalises to nothing.
-    return (flat(title) or (job.get("title") or "").lower().strip(),
-            flat(company) or (job.get("company") or "").lower().strip())
+    return (flat(title) or job.title.lower().strip(),
+            flat(company) or job.company.lower().strip())
 
 
 # Which link survives when two sources carry the same job. A company's own

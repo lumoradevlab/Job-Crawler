@@ -50,9 +50,6 @@ class BoardSpec:
     # Listings that carry no description: fetch each hit once more.
     detail_url: Optional[Callable] = None      # (record) -> url
     merge_detail: Optional[Callable] = None    # (record, payload) -> None
-    # Per-source scratch the record carries between the two passes.
-    ref_keys: Tuple[str, ...] = ()
-
     # What --discover asks to find out whether a slug is real. Defaults to
     # the listing URL; SmartRecruiters overrides it because its listing takes
     # an offset and a one-result probe is cheaper.
@@ -126,10 +123,7 @@ def crawl_boards(spec, cfg, ctx):
         with futures.ThreadPoolExecutor(max_workers=WORKERS) as ex:
             hits = list(ex.map(detail, hits))
 
-    for j in listed:            # scratch fields never reach the output
-        for k in spec.ref_keys:
-            j.pop(k, None)
-    ctx.report.detail(f"{sum(1 for j in hits if j['remote'])} of them are remote")
+    ctx.report.detail(f"{sum(1 for j in hits if j.remote)} of them are remote")
     return hits
 
 
