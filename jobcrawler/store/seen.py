@@ -29,19 +29,46 @@ def load_state(path):
         return {}
 
 
+def record_run(state, today, window_days, succeeded):
+    """Remember this run — advancing only the sources that actually worked."""
+    meta = state.setdefault(META, {})
+    meta["last_run"] = today
+    meta["window_days"] = window_days
+    per = meta.setdefault("sources", {})
+    for name in succeeded:
+        per[name] = today
+    return state
+
+
 def save_state(path, state):
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(state, fh, indent=1, ensure_ascii=False)
 
 
-def catchup_days(state, wanted, today):
+def catchup_days(state, wanted, today, sources=()):
     """How far back this run actually needs to look.
 
     After a 60-day sweep there is no reason to ask for 60 days again the
     next morning — only for what appeared since. Two spare days absorb
     postings that land late or shift timezone.
+
+    Measured per source when `sources` is given, and from the oldest of them.
+    The run-wide "last_run" was wrong in a way that lost postings: it advanced
+    even when a source had failed, so the next morning's window covered only
+    the day since the failed run, and everything the broken source would have
+    returned had already fallen outside it. A source down for a week must be
+    asked for a week.
     """
-    last = (state.get(META) or {}).get("last_run")
+    meta = state.get(META) or {}
+    if sources:
+        stamps = [(meta.get("sources") or {}).get(s) for s in sources]
+        # A source with no recorded success — never run, or failing since
+        # before this bookkeeping existed — needs the whole window.
+        if not all(stamps):
+            return wanted
+        last = min(stamps)
+    else:
+        last = meta.get("last_run")
     if not last:
         return wanted
     try:

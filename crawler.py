@@ -42,7 +42,7 @@ from jobcrawler.cli import main
 from jobcrawler.filters import geo, rules, workplace
 from jobcrawler.net import http
 from jobcrawler.parse import dates, html, salary, text
-from jobcrawler.pipeline import dedupe
+from jobcrawler.pipeline import collect as _collect_mod, dedupe, select as _select_mod
 from jobcrawler.report import events, writers
 from jobcrawler.sources import blocked, linkedin, registry
 from jobcrawler.sources.apis import arbeitnow, himalayas, remoteok, remotive
@@ -55,6 +55,7 @@ from jobcrawler.store import archive, seen
 # Order is only about which module a shared name is credited to; every
 # duplicate below is the same object imported twice, so nothing is shadowed.
 _REEXPORT = (http, html, text, salary, dates, config, context, events, models,
+             _collect_mod, _select_mod,
              workplace, geo, rules,
              seen, archive, dedupe, writers, boards, linkedin, greenhouse,
              ashby, lever, workable, smartrecruiters, discover, builtin, arc,

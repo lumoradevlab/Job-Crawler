@@ -10,15 +10,17 @@ from .filters.rules import rejection
 from .net.http import Fetcher
 from .net.ratelimit import HostPolicy, RateLimiter
 from .models import row  # noqa: F401  (kept on the module for the shim)
+from .pipeline.collect import collect
 from .pipeline.dedupe import SOURCE_RANK, dedupe_key
+from .pipeline.select import SALARY_FIELDS, select, split_new
 from .report.events import Reporter
-from .report.writers import (SALARY_FIELDS, report_rejections,
-                             write_outputs)
+from .report.writers import report_rejections, write_outputs
 from .sources.ats.discover import discover_boards
 from .sources.linkedin import EXPERIENCE
 from .sources.registry import DEFAULT_SOURCES, SOURCES
-from .store.archive import append_archive, load_archive
-from .store.seen import META, catchup_days, job_key, load_state, save_state
+from .store.archive import Archive
+from .store.seen import (META, catchup_days, job_key, load_state,
+                         record_run, save_state)
 
 
 DEFAULT_QUERIES = [
@@ -114,7 +116,9 @@ def report_network(stats, kept, report):
                       + ("; some boards were not read" if not kept else ""))
 
 
-def main():
+def parser():
+    """The command line. Split out so main() shows the run,
+    not 115 lines of flag declarations."""
     p = argparse.ArgumentParser(
         description="Crawl remote Android/mobile jobs across every reachable "
                     "board. US-only unless told otherwise.",
@@ -231,7 +235,11 @@ def main():
                         "where the per-source progress is just noise")
     p.add_argument("--state", metavar="FILE",
                    help="seen-job history file (default <out>_seen.json)")
-    args = p.parse_args()
+    return p
+
+
+def main():
+    args = parser().parse_args()
     report = Reporter(quiet=args.quiet)
     state_path = args.state or (args.out + "_seen.json")
 
@@ -258,7 +266,7 @@ def main():
     # A replay re-filters what is already on disk; narrowing the window to
     # "since the last run" would silently hide almost all of it.
     if not args.full and args.days and not args.replay:
-        narrowed = catchup_days(state, args.days, today)
+        narrowed = catchup_days(state, args.days, today, args.source)
         if narrowed != args.days:
             report.line(f"catching up: asking for the last {narrowed} days "
                         f"instead of {args.days} (last run "
@@ -268,27 +276,21 @@ def main():
     cfg, ctx = build(args, report, days, today, state, boards_found)
     filters = cfg.filters
 
-    archive_path = args.out + "_archive.jsonl"
+    archive = Archive(args.out + "_archive.jsonl")
 
-    collected = []
+    succeeded = set()
     if args.replay:
         # Re-filtering what is already on disk, so every gate still applies
         # but nothing is fetched. Reporting only what is "new" would return
         # nothing at all here, since the archive is by definition seen.
-        collected = load_archive(archive_path)
+        collected = archive.postings()
         args.include_seen = True
         ctx.seen_keys = set()
         report.line(f"replaying {len(collected)} archived postings from "
-                    f"{archive_path} — nothing will be fetched")
+                    f"{archive.path} — nothing will be fetched")
     else:
-        for name in cfg.sources:
-            try:
-                collected.extend(SOURCES[name](cfg, ctx))
-            except KeyboardInterrupt:
-                report.result("\ninterrupted — writing what we have")
-                break
-            except Exception as e:              # keep other sources alive
-                report.warn(f"  ! {name} failed: {type(e).__name__}: {e}")
+        outcome = collect(cfg, ctx, SOURCES)
+        collected, succeeded = outcome.postings, outcome.succeeded
 
     # Every result names a company, and a company name is a candidate ATS
     # slug — so this run's aggregator hits become next run's board list.
@@ -300,66 +302,24 @@ def main():
         boards[META] = {"last_run": today}
         save_state(boards_path, boards)
 
-    # Two sources describing one job is common now that aggregators are in
-    # the mix, and the first one crawled is not the one worth keeping: a
-    # company's own ATS link outlives the aggregator's redirect and states
-    # its location honestly. So collapse on (title, company) by RANK, not by
-    # arrival order.
-    best, rejected = {}, []
-    for j in collected:
-        why = rejection(j, filters)
-        if why:
-            if filters.why:
-                rejected.append((j, why))
-            continue
-        j.us = j.us or us_status(j.location)
-        key = dedupe_key(j)
-        prior = best.get(key)
-        if prior is None or SOURCE_RANK.get(j.source, 50) < \
-                SOURCE_RANK.get(prior.source, 50):
-            # Keep any salary the loser knew and the winner doesn't.
-            if prior and prior.salary_min and not j.salary_min:
-                for f in SALARY_FIELDS:
-                    setattr(j, f, getattr(prior, f))
-            if prior is not None and filters.why:
-                rejected.append((prior, "duplicate: %s carries the same job "
-                                        "on a better link" % j.source))
-            best[key] = j
-        else:
-            if prior.salary_min is None and j.salary_min:
-                for f in SALARY_FIELDS:
-                    setattr(prior, f, getattr(j, f))
-            if filters.why:
-                rejected.append((j, "duplicate: kept the %s record instead"
-                                    % prior.source))
-    jobs = list(best.values())
+    jobs, rejected = select(collected, filters, filters.why)
 
-    if filters.min_salary:
-        jobs = [j for j in jobs
-                if not j.salary_max
-                or (j.salary_max or 0) >= filters.min_salary]
-    jobs.sort(key=lambda j: (j.posted, j.source), reverse=True)
-
-    # Split into new vs already-reported, then remember everything we saw.
-    fresh = []
-    for j in jobs:
-        prior = state.get(job_key(j))
-        j.first_seen = (prior or {}).get("first_seen", today)
-        if prior is None:
-            fresh.append(j)
+    fresh = split_new(jobs, state, today)
     total_matched = len(jobs)
 
     # Everything matched, before the split below narrows the report to what
     # is new — that split is a reporting choice, not a reason to lose data.
     archived = 0
     if not (args.no_archive or args.replay):
-        archived = append_archive(archive_path, jobs)
+        archived = archive.add(jobs)
 
     if not args.replay:
         for j in jobs:
             state[job_key(j)] = {"first_seen": j.first_seen,
                                  "title": j.title, "company": j.company}
-        state[META] = {"last_run": today, "window_days": cfg.days}
+        # Only the sources that actually worked advance their clock; see
+        # catchup_days() for what advancing a failed source's clock costs.
+        record_run(state, today, cfg.days, succeeded)
         save_state(state_path, state)
 
     if not args.include_seen:
@@ -376,7 +336,7 @@ def main():
     ctx.report.result(f"  {len(fresh)} new since the last run, {seen_before} "
                       f"already reported ({total_matched} matched in total)")
     if archived:
-        ctx.report.result(f"  {archived} appended to {archive_path}")
+        ctx.report.result(f"  {archived} appended to {archive.path}")
     if by_source:
         ctx.report.result("  " + ", ".join(f"{k}: {v}"
                                            for k, v in sorted(by_source.items())))

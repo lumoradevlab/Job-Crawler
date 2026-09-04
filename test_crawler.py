@@ -598,6 +598,54 @@ class TestCatchupDays(unittest.TestCase):
         self.assertEqual(c.catchup_days(self.state("nonsense"), 60, "2026-08-31"), 60)
 
 
+class TestPerSourceCatchup(unittest.TestCase):
+    """A source that was down must be asked for the whole time it was down.
+
+    The run-wide last_run advanced even when a source had failed, so the next
+    morning asked for one day and everything the broken source would have
+    returned had already fallen outside the window. Nothing ever went back
+    for it.
+    """
+
+    def state(self, **per_source):
+        return {c.META: {"last_run": "2026-08-30", "sources": dict(per_source)}}
+
+    def test_a_healthy_source_only_asks_for_the_gap(self):
+        st = self.state(greenhouse="2026-08-30")
+        self.assertEqual(
+            c.catchup_days(st, 60, "2026-08-31", ["greenhouse"]), 3)
+
+    def test_a_source_that_has_been_down_asks_for_the_whole_outage(self):
+        st = self.state(greenhouse="2026-08-30", ashby="2026-08-24")
+        self.assertEqual(
+            c.catchup_days(st, 60, "2026-08-31", ["ashby"]), 9)
+
+    def test_the_window_covers_the_oldest_source_in_the_run(self):
+        # One window is asked of every source, so it has to be wide enough
+        # for the one furthest behind.
+        st = self.state(greenhouse="2026-08-30", ashby="2026-08-24")
+        self.assertEqual(
+            c.catchup_days(st, 60, "2026-08-31", ["greenhouse", "ashby"]), 9)
+
+    def test_a_source_never_recorded_asks_for_everything(self):
+        st = self.state(greenhouse="2026-08-30")
+        self.assertEqual(c.catchup_days(st, 60, "2026-08-31", ["lever"]), 60)
+
+    def test_old_state_without_per_source_stamps_still_works(self):
+        # State written before this bookkeeping existed has no "sources" key.
+        old = {c.META: {"last_run": "2026-08-30"}}
+        self.assertEqual(c.catchup_days(old, 60, "2026-08-31", ["ashby"]), 60)
+        self.assertEqual(c.catchup_days(old, 60, "2026-08-31"), 3)
+
+    def test_only_the_sources_that_worked_advance(self):
+        st = self.state(greenhouse="2026-08-24", ashby="2026-08-24")
+        c.record_run(st, "2026-08-31", 60, {"greenhouse"})
+        self.assertEqual(st[c.META]["sources"],
+                         {"greenhouse": "2026-08-31", "ashby": "2026-08-24"})
+        # ashby is still nine days behind and will be asked for nine days.
+        self.assertEqual(c.catchup_days(st, 60, "2026-08-31", ["ashby"]), 9)
+
+
 # ==========================================================================
 # Identity and de-duplication
 # ==========================================================================
