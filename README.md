@@ -520,6 +520,18 @@ absent from the failure accounting, and untestable offline.
 loop, so a sixth is a `BoardSpec` saying where to ask and how to read a
 posting, not a sixth copy of the loop. `--discover` picks it up automatically.
 
+**Using it as a library.** `jobcrawler/__init__.py` lists the public API.
+A source needs a config and a context and nothing else — no argparse, and no
+network unless you hand it a real fetcher:
+
+```python
+from jobcrawler import CrawlConfig, RunContext, NullReporter
+from jobcrawler.sources.registry import SOURCES
+
+cfg = CrawlConfig(boards={"greenhouse": ("stripe",)})
+postings = SOURCES["greenhouse"](cfg, RunContext(report=NullReporter()))
+```
+
 **Tests are the contract.** The grading rules are nearly all regexes tuned
 against whatever boards happened to return that week, so a change that looks
 obviously right is exactly the kind that quietly loses 19% of results. Add

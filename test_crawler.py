@@ -25,7 +25,17 @@ import unittest
 from argparse import Namespace
 from datetime import datetime, timezone
 
-import crawler as c
+import jobcrawler as c
+from jobcrawler.filters import rules, workplace
+from jobcrawler.parse import html as html_parse
+from jobcrawler.parse import salary
+from jobcrawler.report import writers
+from jobcrawler.sources import blocked, linkedin
+from jobcrawler.sources.ats import ashby, boards, discover
+from jobcrawler.sources.ats.driver import specs
+from jobcrawler.sources.boards import builtin
+from jobcrawler.sources.keyed import serpapi
+from jobcrawler.store import archive, seen
 
 
 def make_args(**over):
@@ -175,16 +185,16 @@ class TestBuiltinUs(unittest.TestCase):
     """Built In writes countries as ISO-3, which us_status() cannot read."""
 
     def test_iso3_codes(self):
-        self.assertEqual(c.builtin_us("Berlin, DEU"), "no")
-        self.assertEqual(c.builtin_us("Amsterdam, NLD"), "no")
-        self.assertEqual(c.builtin_us("New York, USA"), "us")
+        self.assertEqual(builtin.builtin_us("Berlin, DEU"), "no")
+        self.assertEqual(builtin.builtin_us("Amsterdam, NLD"), "no")
+        self.assertEqual(builtin.builtin_us("New York, USA"), "us")
 
     def test_multi_country_qualifies_on_ours(self):
-        self.assertEqual(c.builtin_us("USA, DEU"), "us")
+        self.assertEqual(builtin.builtin_us("USA, DEU"), "us")
 
     def test_falls_back_to_prose_when_no_code(self):
-        self.assertEqual(c.builtin_us("Chicago, IL"), "us")
-        self.assertEqual(c.builtin_us("Remote"), "unknown")
+        self.assertEqual(builtin.builtin_us("Chicago, IL"), "us")
+        self.assertEqual(builtin.builtin_us("Remote"), "unknown")
 
 
 # ==========================================================================
@@ -196,33 +206,33 @@ class TestWorkplaceRegexes(unittest.TestCase):
         for title in ["Android Engineer (Hybrid)", "Android Engineer - Onsite",
                       "Mobile Developer, In-Office", "Android Dev (On-Site)"]:
             with self.subTest(title=title):
-                self.assertTrue(c.ONSITE.search(title))
+                self.assertTrue(workplace.ONSITE.search(title))
 
     def test_hybrid_as_a_stack_is_not_an_office(self):
         # "Hybrid app developer" means React Native, not a hybrid office.
         for title in ["Hybrid App Developer", "Hybrid Mobile Engineer",
                       "Hybrid Application Developer"]:
             with self.subTest(title=title):
-                self.assertFalse(c.ONSITE.search(title))
+                self.assertFalse(workplace.ONSITE.search(title))
 
     def test_clean_remote_titles_are_untouched(self):
         for title in ["Senior Android Developer", "Remote Android Engineer",
                       "Kotlin Engineer"]:
             with self.subTest(title=title):
-                self.assertFalse(c.ONSITE.search(title))
+                self.assertFalse(workplace.ONSITE.search(title))
 
     def test_split_week_is_hybrid_however_worded(self):
         for title in ["3 days onsite 2 days remote", "Hybrid - 3 days",
                       "2x week in office", "4 days a week in the office"]:
             with self.subTest(title=title):
-                self.assertTrue(c.HYBRID_SPLIT.search(title))
+                self.assertTrue(workplace.HYBRID_SPLIT.search(title))
 
     def test_remote_strong_needs_a_commitment(self):
         for body in ["This role is fully remote", "we are a remote-first company",
                      "100% remote", "US-Remote", "open to remote",
                      "work from anywhere"]:
             with self.subTest(body=body):
-                self.assertTrue(c.REMOTE_STRONG.search(body))
+                self.assertTrue(workplace.REMOTE_STRONG.search(body))
 
     def test_boilerplate_remote_does_not_count(self):
         # The whole reason REMOTE_STRONG exists: this sentence appears in
@@ -230,25 +240,25 @@ class TestWorkplaceRegexes(unittest.TestCase):
         for body in ["if the role can be performed remotely",
                      "we may consider remote for the right candidate"]:
             with self.subTest(body=body):
-                self.assertFalse(c.REMOTE_STRONG.search(body))
+                self.assertFalse(workplace.REMOTE_STRONG.search(body))
 
     def test_onsite_strong_needs_a_commitment_too(self):
         for body in ["This position is onsite", "3 days a week in the office",
                      "Location: Austin - hybrid", "required to work on-site"]:
             with self.subTest(body=body):
-                self.assertTrue(c.ONSITE_STRONG.search(body))
+                self.assertTrue(workplace.ONSITE_STRONG.search(body))
 
     def test_incidental_onsite_does_not_count(self):
         for body in ["onsite interviews will follow",
                      "you will meet customers onsite twice a year"]:
             with self.subTest(body=body):
-                self.assertFalse(c.ONSITE_STRONG.search(body))
+                self.assertFalse(workplace.ONSITE_STRONG.search(body))
 
 
 class TestRelevanceGate(unittest.TestCase):
 
     def assertRelevant(self, title, want):
-        got = bool(c.RELEVANT.search(title) and c.ROLE.search(title))
+        got = bool(rules.RELEVANT.search(title) and rules.ROLE.search(title))
         self.assertEqual(got, want, title)
 
     def test_mobile_engineering_titles_pass(self):
@@ -501,7 +511,7 @@ class TestReportRejections(unittest.TestCase):
 
     def test_every_column_is_written_even_when_a_field_is_missing(self):
         rows, _ = self.report([({"source": "hn", "title": "x"}, "region: ?")])
-        self.assertEqual(set(rows[0]), set(c.REJECTED_COLUMNS))
+        self.assertEqual(set(rows[0]), set(writers.REJECTED_COLUMNS))
 
 
 # ==========================================================================
@@ -580,7 +590,7 @@ class TestCatchupDays(unittest.TestCase):
     """After a 60-day sweep the next run only needs the days since."""
 
     def state(self, last_run):
-        return {c.META: {"last_run": last_run}}
+        return {seen.META: {"last_run": last_run}}
 
     def test_no_history_asks_for_the_whole_window(self):
         self.assertEqual(c.catchup_days({}, 60, "2026-08-31"), 60)
@@ -608,7 +618,7 @@ class TestPerSourceCatchup(unittest.TestCase):
     """
 
     def state(self, **per_source):
-        return {c.META: {"last_run": "2026-08-30", "sources": dict(per_source)}}
+        return {seen.META: {"last_run": "2026-08-30", "sources": dict(per_source)}}
 
     def test_a_healthy_source_only_asks_for_the_gap(self):
         st = self.state(greenhouse="2026-08-30")
@@ -633,14 +643,14 @@ class TestPerSourceCatchup(unittest.TestCase):
 
     def test_old_state_without_per_source_stamps_still_works(self):
         # State written before this bookkeeping existed has no "sources" key.
-        old = {c.META: {"last_run": "2026-08-30"}}
+        old = {seen.META: {"last_run": "2026-08-30"}}
         self.assertEqual(c.catchup_days(old, 60, "2026-08-31", ["ashby"]), 60)
         self.assertEqual(c.catchup_days(old, 60, "2026-08-31"), 3)
 
     def test_only_the_sources_that_worked_advance(self):
         st = self.state(greenhouse="2026-08-24", ashby="2026-08-24")
         c.record_run(st, "2026-08-31", 60, {"greenhouse"})
-        self.assertEqual(st[c.META]["sources"],
+        self.assertEqual(st[seen.META]["sources"],
                          {"greenhouse": "2026-08-31", "ashby": "2026-08-24"})
         # ashby is still nine days behind and will be asked for nine days.
         self.assertEqual(c.catchup_days(st, 60, "2026-08-31", ["ashby"]), 9)
@@ -684,33 +694,33 @@ class TestArchive(unittest.TestCase):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def test_a_missing_archive_is_empty_not_an_error(self):
-        self.assertEqual(c.load_archive(self.path), [])
+        self.assertEqual(archive.load_archive(self.path), [])
 
     def test_what_is_appended_comes_back(self):
-        c.append_archive(self.path, [make_job(url="https://x/1")])
-        got = c.load_archive(self.path)
+        archive.append_archive(self.path, [make_job(url="https://x/1")])
+        got = archive.load_archive(self.path)
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0].title, "Senior Android Engineer")
 
     def test_appending_never_rewrites_what_is_there(self):
-        c.append_archive(self.path, [make_job(url="https://x/1")])
-        c.append_archive(self.path, [make_job(url="https://x/2")])
-        self.assertEqual([j.url for j in c.load_archive(self.path)],
+        archive.append_archive(self.path, [make_job(url="https://x/1")])
+        archive.append_archive(self.path, [make_job(url="https://x/2")])
+        self.assertEqual([j.url for j in archive.load_archive(self.path)],
                          ["https://x/1", "https://x/2"])
 
     def test_a_posting_already_archived_is_not_added_twice(self):
         job = make_job(url="https://x/1")
-        self.assertEqual(c.append_archive(self.path, [job]), 1)
-        self.assertEqual(c.append_archive(self.path, [job]), 0)
-        self.assertEqual(len(c.load_archive(self.path)), 1)
+        self.assertEqual(archive.append_archive(self.path, [job]), 1)
+        self.assertEqual(archive.append_archive(self.path, [job]), 0)
+        self.assertEqual(len(archive.load_archive(self.path)), 1)
 
     def test_a_half_written_line_does_not_lose_the_file(self):
         # An interrupted run can leave a partial line; the rest must survive.
-        c.append_archive(self.path, [make_job(url="https://x/1")])
+        archive.append_archive(self.path, [make_job(url="https://x/1")])
         with open(self.path, "a", encoding="utf-8") as fh:
             fh.write('{"url": "https://x/2", "ti\n')
-        c.append_archive(self.path, [make_job(url="https://x/3")])
-        self.assertEqual([j.url for j in c.load_archive(self.path)],
+        archive.append_archive(self.path, [make_job(url="https://x/3")])
+        self.assertEqual([j.url for j in archive.load_archive(self.path)],
                          ["https://x/1", "https://x/3"])
 
     def test_scratch_fields_cannot_reach_the_archive(self):
@@ -718,7 +728,7 @@ class TestArchive(unittest.TestCase):
         # so this holds for a field no one has invented yet, where the old
         # hand-written BOOKKEEPING tuple only covered the five it listed.
         job = make_job(url="https://x/1", match_text="body", gh_token="stripe")
-        c.append_archive(self.path, [job])
+        archive.append_archive(self.path, [job])
         with open(self.path, encoding="utf-8") as fh:
             written = json.loads(fh.readline())
         self.assertNotIn("match_text", written)
@@ -729,9 +739,9 @@ class TestArchive(unittest.TestCase):
     def test_the_archive_keeps_the_fields_the_seen_state_throws_away(self):
         # The point of the file: the seen-state remembers a title, a company
         # and a date, and nothing that makes a posting worth reading later.
-        c.append_archive(self.path, [make_job(
+        archive.append_archive(self.path, [make_job(
             url="https://x/1", location="Remote - US", salary_min=180000)])
-        stored, = c.load_archive(self.path)
+        stored, = archive.load_archive(self.path)
         for field in ("location", "salary_min", "posted", "source", "url"):
             self.assertTrue(getattr(stored, field),
                             f"{field} did not survive the archive")
@@ -854,19 +864,19 @@ class TestAshbyPlaces(unittest.TestCase):
                  "address": {"postalAddress": {"addressCountry": "United States"}}},
             ],
         }
-        label, countries = c.ashby_places(job)
+        label, countries = ashby.ashby_places(job)
         self.assertEqual(label, "New York / Remote (US)")
         self.assertEqual(countries, {"united states"})
 
     def test_missing_address_is_not_an_error(self):
-        label, countries = c.ashby_places({"location": "Remote"})
+        label, countries = ashby.ashby_places({"location": "Remote"})
         self.assertEqual(label, "Remote")
         self.assertEqual(countries, set())
 
     def test_duplicate_labels_collapse(self):
         job = {"location": "Remote",
                "secondaryLocations": [{"location": "Remote"}]}
-        self.assertEqual(c.ashby_places(job)[0], "Remote")
+        self.assertEqual(ashby.ashby_places(job)[0], "Remote")
 
 
 class TestJobCardParser(unittest.TestCase):
@@ -884,7 +894,7 @@ class TestJobCardParser(unittest.TestCase):
     """
 
     def parse(self, html):
-        p = c.JobCardParser()
+        p = linkedin.JobCardParser()
         p.feed(html)
         p.close()
         return p.jobs
@@ -925,12 +935,12 @@ class TestNextData(unittest.TestCase):
         html = ('<script id="__NEXT_DATA__" type="application/json">'
                 '{"props":{"pageProps":{"arcJobs":[{"title":"Android"}]}}}'
                 '</script>')
-        self.assertEqual(c.next_data(html),
+        self.assertEqual(html_parse.next_data(html),
                          {"arcJobs": [{"title": "Android"}]})
 
     def test_a_page_without_the_payload_is_empty_not_an_error(self):
-        self.assertEqual(c.next_data("<html>nothing here</html>"), {})
-        self.assertEqual(c.next_data(
+        self.assertEqual(html_parse.next_data("<html>nothing here</html>"), {})
+        self.assertEqual(html_parse.next_data(
             '<script id="__NEXT_DATA__">not json</script>'), {})
 
 
@@ -941,22 +951,22 @@ class TestGoogleSalary(unittest.TestCase):
     """Google names the interval in words and often omits the currency."""
 
     def test_a_year(self):
-        self.assertEqual(c.google_salary("84K–96K a year"), (84000, 96000))
-        self.assertEqual(c.google_salary("$100,000–$120,000 a year"),
+        self.assertEqual(salary.google_salary("84K–96K a year"), (84000, 96000))
+        self.assertEqual(salary.google_salary("$100,000–$120,000 a year"),
                          (100000, 120000))
 
     def test_an_hour_is_annualised(self):
-        self.assertEqual(c.google_salary("$40 an hour"), (83200, None))
-        self.assertEqual(c.google_salary("$25–$30 an hour"), (52000, 62400))
+        self.assertEqual(salary.google_salary("$40 an hour"), (83200, None))
+        self.assertEqual(salary.google_salary("$25–$30 an hour"), (52000, 62400))
 
     def test_a_month_and_a_week(self):
-        self.assertEqual(c.google_salary("$5,000 a month"), (60000, None))
-        self.assertEqual(c.google_salary("$2,000 a week"), (104000, None))
+        self.assertEqual(salary.google_salary("$5,000 a month"), (60000, None))
+        self.assertEqual(salary.google_salary("$2,000 a week"), (104000, None))
 
     def test_no_figure(self):
         for text in ["", None, "competitive", "5 years of experience"]:
             with self.subTest(text=text):
-                self.assertEqual(c.google_salary(text), (None, None))
+                self.assertEqual(salary.google_salary(text), (None, None))
 
 
 class TestCrawlSerpApi(unittest.TestCase):
@@ -1029,7 +1039,7 @@ class TestCrawlSerpApi(unittest.TestCase):
                 return queue.pop(0) if queue else None
 
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            jobs = c.crawl_serpapi(make_cfg(**over), make_ctx(fetch=Recording()))
+            jobs = serpapi.crawl_serpapi(make_cfg(**over), make_ctx(fetch=Recording()))
         return jobs, buf.getvalue()
 
     def test_the_mobile_roles_are_kept_and_the_others_are_not(self):
@@ -1082,7 +1092,7 @@ class TestCrawlSerpApi(unittest.TestCase):
     def test_pages_are_capped_however_many_are_asked_for(self):
         page = dict(self.SAMPLE, serpapi_pagination={"next_page_token": "t"})
         self.crawl([page] * 10, pages=99)
-        self.assertEqual(len(self.urls), c.SERPAPI_MAX_PAGES)
+        self.assertEqual(len(self.urls), serpapi.SERPAPI_MAX_PAGES)
 
     def test_pagination_follows_the_token_and_stops_without_one(self):
         first = dict(self.SAMPLE, serpapi_pagination={"next_page_token": "abc"})
@@ -1109,29 +1119,29 @@ class TestCrawlSerpApi(unittest.TestCase):
 class TestSlugCandidates(unittest.TestCase):
 
     def test_a_one_word_name_is_its_own_slug(self):
-        self.assertEqual(c.slug_candidates("Klaviyo"), ["klaviyo"])
+        self.assertEqual(discover.slug_candidates("Klaviyo"), ["klaviyo"])
 
     def test_legal_suffixes_are_dropped(self):
         for name in ["Scribd, Inc.", "Scribd LLC", "Scribd Ltd.", "Scribd GmbH"]:
             with self.subTest(name=name):
-                self.assertEqual(c.slug_candidates(name), ["scribd"])
+                self.assertEqual(discover.slug_candidates(name), ["scribd"])
 
     def test_both_spellings_of_a_two_word_name_are_tried(self):
         # Nothing anywhere says which one an ATS uses, so all three are probed.
-        self.assertEqual(c.slug_candidates("Epic Games"),
+        self.assertEqual(discover.slug_candidates("Epic Games"),
                          ["epicgames", "epic-games", "epic"])
 
     def test_only_a_two_word_name_gives_up_its_head_word(self):
         # "Bank of America" must not probe "bank".
-        self.assertEqual(c.slug_candidates("Bank of America"),
+        self.assertEqual(discover.slug_candidates("Bank of America"),
                          ["bankofamerica", "bank-of-america"])
 
     def test_a_short_head_word_is_not_offered_alone(self):
-        self.assertNotIn("big", c.slug_candidates("Big Data Co"))
+        self.assertNotIn("big", discover.slug_candidates("Big Data Co"))
 
     def test_punctuation_and_apostrophes(self):
-        self.assertEqual(c.slug_candidates("Alarm.com"), ["alarmcom"])
-        self.assertEqual(c.slug_candidates("O'Reilly"), ["oreilly"])
+        self.assertEqual(discover.slug_candidates("Alarm.com"), ["alarmcom"])
+        self.assertEqual(discover.slug_candidates("O'Reilly"), ["oreilly"])
 
     def test_fields_that_are_not_company_names_are_left_alone(self):
         # HN's "company" is the first line of a post; Built In sometimes
@@ -1141,27 +1151,27 @@ class TestSlugCandidates(unittest.TestCase):
                      "Hudson Information Technology and Manpower Services",
                      "", None, "  "]:
             with self.subTest(junk=junk):
-                self.assertEqual(c.slug_candidates(junk), [])
+                self.assertEqual(discover.slug_candidates(junk), [])
 
 
 class TestBoardList(unittest.TestCase):
 
     def test_builtins_alone_when_nothing_discovered(self):
-        self.assertEqual(c.board_list("greenhouse", ["stripe"], make_ctx()),
+        self.assertEqual(boards.board_list("greenhouse", ["stripe"], make_ctx()),
                          ["stripe"])
 
     def test_discovered_slugs_are_appended(self):
         ctx = make_ctx(boards_found={"greenhouse": ["klaviyo"],
                                      "lever": ["gopuff"]})
-        self.assertEqual(c.board_list("greenhouse", ["stripe"], ctx),
+        self.assertEqual(boards.board_list("greenhouse", ["stripe"], ctx),
                          ["stripe", "klaviyo"])
 
     def test_a_rediscovered_builtin_is_not_listed_twice(self):
         ctx = make_ctx(boards_found={"greenhouse": ["stripe"]})
-        self.assertEqual(c.board_list("greenhouse", ["stripe"], ctx), ["stripe"])
+        self.assertEqual(boards.board_list("greenhouse", ["stripe"], ctx), ["stripe"])
 
     def test_known_slugs_covers_builtins_and_finds(self):
-        known = c.known_slugs({"found": {"lever": ["wealthfront"]}})
+        known = discover.known_slugs({"found": {"lever": ["wealthfront"]}})
         self.assertIn("wealthfront", known)
         self.assertIn("stripe", known)      # a built-in Greenhouse board
 
@@ -1170,21 +1180,21 @@ class TestDiscoverBoards(unittest.TestCase):
     """The probe itself is network; everything around it is not."""
 
     def setUp(self):
-        self.real = c.probe_board
+        self.real = discover.probe_board
         self.probed = []
 
     def tearDown(self):
-        c.probe_board = self.real
+        discover.probe_board = self.real
 
     def stub(self, hosts):
         def probe(slug, ctx):
             self.probed.append(slug)
             return hosts.get(slug)
-        c.probe_board = probe
+        discover.probe_board = probe
 
     def run_discovery(self, names, boards, today="2026-08-31"):
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            hits = c.discover_boards(names, boards, today, make_ctx())
+            hits = discover.discover_boards(names, boards, today, make_ctx())
         return hits, buf.getvalue()
 
     def test_a_hit_is_recorded_under_its_ats(self):
@@ -1228,9 +1238,9 @@ class TestDiscoverBoards(unittest.TestCase):
 
     def test_the_queue_is_capped_and_the_rest_wait(self):
         self.stub({})
-        names = [f"Company{n}" for n in range(c.DISCOVER_CAP + 25)]
+        names = [f"Company{n}" for n in range(discover.DISCOVER_CAP + 25)]
         _, out = self.run_discovery(names, {})
-        self.assertEqual(len(self.probed), c.DISCOVER_CAP)
+        self.assertEqual(len(self.probed), discover.DISCOVER_CAP)
         self.assertIn("25 more next run", out)
 
     def test_nothing_to_do_says_so(self):
@@ -1253,7 +1263,7 @@ class TestWiring(unittest.TestCase):
     def test_every_source_has_a_dedupe_rank(self):
         # Without a rank a new source defaults to 50 and quietly loses every
         # head-to-head against an aggregator.
-        missing = set(c.SOURCES) - set(c.SOURCE_RANK) - set(c.BLOCKED)
+        missing = set(c.SOURCES) - set(c.SOURCE_RANK) - set(blocked.BLOCKED)
         self.assertEqual(missing, set())
 
     def test_default_sources_all_exist(self):
@@ -1279,14 +1289,21 @@ class TestWiring(unittest.TestCase):
         self.assertEqual(set(c.RECORD_FIELDS) - set(c.COLUMNS), {"remote"})
 
     def test_board_lists_have_no_duplicates(self):
-        for name in ("GREENHOUSE_BOARDS", "ASHBY_BOARDS", "LEVER_BOARDS",
-                     "WORKABLE_BOARDS", "SMARTRECRUITERS_BOARDS"):
-            boards = getattr(c, name)
-            with self.subTest(list=name):
-                self.assertEqual(len(boards), len(set(boards)))
+        for spec in specs():
+            with self.subTest(ats=spec.name):
+                self.assertEqual(len(spec.boards), len(set(spec.boards)))
+
+    def test_every_ats_spec_can_be_probed_for_discovery(self):
+        # --discover reads the same specs the crawlers use; a spec whose
+        # listing URL needs an offset must say so with its own probe_url or
+        # discovery would format it wrong and silently find nothing.
+        for spec in specs():
+            with self.subTest(ats=spec.name):
+                url = (spec.probe_url or spec.list_url).format("slug")
+                self.assertNotIn("{}", url)
 
     def test_blocked_sources_explain_themselves_and_return_nothing(self):
-        for name in c.BLOCKED:
+        for name in blocked.BLOCKED:
             with self.subTest(source=name):
                 self.assertEqual(
                     c.SOURCES[name](make_cfg(), make_ctx()), [])

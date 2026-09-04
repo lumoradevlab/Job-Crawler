@@ -13,7 +13,7 @@ Stdlib only, like the crawler itself.
 
 import unittest
 
-import crawler as c
+import jobcrawler as c
 
 
 def cfg(sources, **over):
