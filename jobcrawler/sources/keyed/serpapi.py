@@ -8,7 +8,6 @@ import urllib.parse
 from ...filters.rules import relevant
 from ...filters.workplace import REMOTE_HINT
 from ...models import row
-from ...net.http import fetch_json
 from ...parse.dates import relative_date
 from ...parse.html import strip_tags
 from ...parse.salary import google_salary
@@ -33,16 +32,16 @@ SERPAPI_SEARCH = "https://serpapi.com/search"
 SERPAPI_MAX_PAGES = 3
 
 
-def crawl_serpapi(args):
+def crawl_serpapi(cfg, ctx):
     """Google Jobs results, one SerpApi search per keyword per page."""
     keys = need_keys("serpapi", "SERPAPI_KEY")
     if not keys:
         return []
     key, = keys
-    pages = max(1, min(args.pages, SERPAPI_MAX_PAGES))
+    pages = max(1, min(cfg.pages, SERPAPI_MAX_PAGES))
     out, spent = [], 0
 
-    for q in args.keywords:
+    for q in cfg.keywords:
         token, got = None, 0
         for _ in range(pages):
             params = {"engine": "google_jobs", "q": q + " remote",
@@ -51,11 +50,11 @@ def crawl_serpapi(args):
             # SerpApi rejects a location it cannot resolve, and "Worldwide"
             # is not one of its places — so --anywhere drops the parameter
             # rather than erroring the whole source out.
-            if args.location.strip().lower() not in ("worldwide", "anywhere"):
-                params["location"] = args.location
+            if cfg.location.strip().lower() not in ("worldwide", "anywhere"):
+                params["location"] = cfg.location
             if token:
                 params["next_page_token"] = token
-            data = fetch_json(
+            data = ctx.fetch.get_json(
                 SERPAPI_SEARCH + "?" + urllib.parse.urlencode(params),
                 tries=2, headers=JSON_ONLY)
             spent += 1
@@ -70,7 +69,7 @@ def crawl_serpapi(args):
 
             for j in data.get("jobs_results") or []:
                 title = (j.get("title") or "").strip()
-                if not relevant(title, args):
+                if not relevant(title, cfg.filters, "serpapi"):
                     continue
                 det = j.get("detected_extensions") or {}
                 first = (j.get("apply_options") or [{}])[0]

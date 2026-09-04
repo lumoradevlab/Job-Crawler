@@ -24,21 +24,27 @@ ROLE = re.compile(
 _SKIPPED = []
 
 
-def relevant(title, args):
-    """The Android/mobile title gate the sources apply for themselves."""
-    if args.no_filter or (RELEVANT.search(title) and ROLE.search(title)):
+def relevant(title, filters, source="?"):
+    """The Android/mobile title gate the sources apply for themselves.
+
+    The source names itself rather than the gate reading a "who is running
+    now" field off shared state: the ATS crawlers call this from a six-worker
+    pool, where one mutable field would attribute drops to whichever source
+    happened to set it last.
+    """
+    if filters.no_filter or (RELEVANT.search(title) and ROLE.search(title)):
         return True
-    if getattr(args, "why", False):
-        _SKIPPED.append((getattr(args, "source_now", "?"), title))
+    if filters.why:
+        _SKIPPED.append((source, title))
     return False
 
 
-def keep(job, args):
+def keep(job, filters):
     """The single gate every posting must pass, whatever its source."""
-    return rejection(job, args) is None
+    return rejection(job, filters) is None
 
 
-def rejection(job, args):
+def rejection(job, filters):
     """Which rule rejects this posting, or None if it passes them all.
 
     keep() is this function's yes/no shadow, so --why can name the rule that
@@ -51,19 +57,19 @@ def rejection(job, args):
     # bury it in the body, so they set match_text to widen the gate.
     subject = job.get("match_text") or title
 
-    if not args.no_filter and not (RELEVANT.search(subject)
+    if not filters.no_filter and not (RELEVANT.search(subject)
                                    and ROLE.search(subject)):
         return "not-mobile: no Android/mobile role in the title"
-    if args.must:
+    if filters.must:
         hay = (title + " " + job.get("description", "")).lower()
-        absent = [w for w in args.must if w.lower() not in hay]
+        absent = [w for w in filters.must if w.lower() not in hay]
         if absent:
             return "must: never says " + ", ".join(absent)
-    if args.exclude:
-        banned = [w for w in args.exclude if w.lower() in title.lower()]
+    if filters.exclude:
+        banned = [w for w in filters.exclude if w.lower() in title.lower()]
         if banned:
             return "exclude: title says " + ", ".join(banned)
-    if args.easy_apply_only and job.get("easy_apply") != "yes":
+    if filters.easy_apply_only and job.get("easy_apply") != "yes":
         return "easy-apply: not an Easy Apply posting"
     if not job.get("remote"):
         return "not-remote: the source never flagged it remote"
@@ -84,20 +90,20 @@ def rejection(job, args):
         return "onsite: says %r and never says remote" % (
             office.group(0).strip(),)
 
-    if not args.anywhere:
+    if not filters.anywhere:
         status = job.get("us") or us_status(job.get("location", ""))
         if status == "no":
             return "region: fenced outside the US (%s)" % (
                 job.get("location") or "no location given",)
-        if args.strict_us and status != "us":
+        if filters.strict_us and status != "us":
             return "not-us: --strict-us, and the location reads %s" % status
 
-    if args.days and job.get("posted"):
+    if filters.days and job.get("posted"):
         try:
             posted = datetime.strptime(job["posted"][:10], "%Y-%m-%d")
-            if posted < datetime.now() - timedelta(days=args.days):
+            if posted < datetime.now() - timedelta(days=filters.days):
                 return "too-old: posted %s, window is %d days" % (
-                    job["posted"][:10], args.days)
+                    job["posted"][:10], filters.days)
         except ValueError:
             pass
     return None

@@ -9,7 +9,6 @@ from html.parser import HTMLParser
 from ..filters.rules import relevant
 from ..filters.workplace import ONSITE_STRONG, REMOTE_STRONG
 from ..models import row
-from ..net.http import fetch
 from ..parse.html import strip_tags
 from ..store.seen import job_key
 
@@ -102,13 +101,13 @@ class JobCardParser(HTMLParser):
         self._cur = None
 
 
-def linkedin_detail(job_id):
+def linkedin_detail(job_id, ctx):
     """Description, Easy Apply flag and external apply URL for one posting.
 
     LinkedIn marks the apply button 'apply-link-onsite' for Easy Apply and
     'apply-link-offsite' when it hands you off to the company's own site.
     """
-    html = fetch(LINKEDIN_DETAIL.format(job_id))
+    html = ctx.fetch.get(LINKEDIN_DETAIL.format(job_id))
     if not html:
         return {}
 
@@ -138,29 +137,29 @@ def linkedin_detail(job_id):
     return out
 
 
-def crawl_linkedin(args):
+def crawl_linkedin(cfg, ctx):
     """Run every keyword query, paging until a query runs dry."""
     seen, jobs = set(), []
 
-    for query in args.keywords:
+    for query in cfg.keywords:
         params = {
             "keywords": query,
-            "location": args.location,
+            "location": cfg.location,
             "f_WT": WORKPLACE_REMOTE,
             "sortBy": "DD",  # most recent first
         }
-        geo = GEO_IDS.get(args.location.strip().lower())
+        geo = GEO_IDS.get(cfg.location.strip().lower())
         if geo:
             params["geoId"] = geo
-        if args.days:
-            params["f_TPR"] = "r%d" % (args.days * 86400)
-        if args.level:
-            params["f_E"] = EXPERIENCE[args.level]
+        if cfg.days:
+            params["f_TPR"] = "r%d" % (cfg.days * 86400)
+        if cfg.level:
+            params["f_E"] = EXPERIENCE[cfg.level]
 
         print(f'[linkedin] query: "{query}"')
-        for page in range(args.pages):
+        for page in range(cfg.pages):
             params["start"] = page * 10
-            html = fetch(LINKEDIN_SEARCH + "?" + urllib.parse.urlencode(params))
+            html = ctx.fetch.get(LINKEDIN_SEARCH + "?" + urllib.parse.urlencode(params))
             if not html.strip():
                 print(f"  page {page + 1}: empty — end of this query")
                 break
@@ -186,14 +185,14 @@ def crawl_linkedin(args):
             print(f"  page {page + 1}: {len(parser.jobs)} cards, "
                   f"+{new} new (running total {len(jobs)})")
 
-    if args.details:
+    if cfg.details:
         # One request per posting, so only pay it for jobs we haven't read.
-        known = getattr(args, "seen_keys", set())
+        known = ctx.seen_keys
         todo = [j for j in jobs if job_key(j) not in known]
         print(f"[linkedin] fetching details for {len(todo)} new jobs "
-              f"(~{len(todo) * args.delay / 60:.0f} min)")
+              f"(~{len(todo) * cfg.delay / 60:.0f} min)")
         for i, job in enumerate(todo, 1):
-            job.update(linkedin_detail(job["job_id"]))
+            job.update(linkedin_detail(job["job_id"], ctx))
             if i % 10 == 0:
                 print(f"  {i}/{len(todo)}")
     return jobs

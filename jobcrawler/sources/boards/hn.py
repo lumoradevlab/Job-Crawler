@@ -9,22 +9,21 @@ from ...filters.geo import us_status
 from ...filters.rules import RELEVANT
 from ...filters.workplace import REMOTE_HINT
 from ...models import row
-from ...net.http import fetch_json
 from ...parse.html import strip_tags
 
 
 HN_ITEM = "https://hacker-news.firebaseio.com/v0/item/{}.json"
 
 
-def crawl_hn(args):
-    user = fetch_json("https://hacker-news.firebaseio.com/v0/user/whoishiring.json")
+def crawl_hn(cfg, ctx):
+    user = ctx.fetch.get_json("https://hacker-news.firebaseio.com/v0/user/whoishiring.json")
     if not user:
         print("[hn] could not read the whoishiring user")
         return []
 
     thread = None
     for sid in (user.get("submitted") or [])[:12]:
-        item = fetch_json(HN_ITEM.format(sid)) or {}
+        item = ctx.fetch.get_json(HN_ITEM.format(sid)) or {}
         if re.search(r"who is hiring", item.get("title", ""), re.I):
             thread = item
             break
@@ -36,7 +35,7 @@ def crawl_hn(args):
     print(f"[hn] {thread.get('title')} — {len(kids)} top-level posts")
 
     def one(cid):
-        c = fetch_json(HN_ITEM.format(cid), tries=2) or {}
+        c = ctx.fetch.get_json(HN_ITEM.format(cid), tries=2) or {}
         if not c or c.get("deleted") or c.get("dead") or not c.get("text"):
             return None
         body = strip_tags(c["text"])

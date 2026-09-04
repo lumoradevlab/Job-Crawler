@@ -5,15 +5,14 @@ import urllib.parse
 from datetime import datetime, timezone
 
 from ...models import row
-from ...net.http import fetch
 from ...parse.html import next_data
 
 
-def crawl_arc(args):
+def crawl_arc(cfg, ctx):
     jobs = []
-    for q in args.keywords:
+    for q in cfg.keywords:
         url = "https://arc.dev/remote-jobs?" + urllib.parse.urlencode({"search": q})
-        props = next_data(fetch(url))
+        props = next_data(ctx.fetch.get(url))
         found = 0
         for key in ("arcJobs", "externalJobs"):
             for j in props.get(key) or []:

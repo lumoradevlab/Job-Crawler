@@ -7,7 +7,6 @@ from ...filters.geo import us_status
 from ...filters.rules import relevant
 from ...filters.workplace import REMOTE_HINT, REMOTE_STRONG
 from ...models import row
-from ...net.http import fetch_json
 from ...parse.html import strip_tags
 from .base import JSON_ONLY, need_keys
 
@@ -17,7 +16,7 @@ ADZUNA_SEARCH = ("https://api.adzuna.com/v1/api/jobs/us/search/{page}"
                  "&what_phrase={phrase}&what={extra}&sort_by=date{age}")
 
 
-def crawl_adzuna(args):
+def crawl_adzuna(cfg, ctx):
     """Adzuna carries salary — the only source here that does for most rows.
 
     It has no remote field at all, though: "remote" can only be asked for as
@@ -29,12 +28,12 @@ def crawl_adzuna(args):
     if not keys:
         return []
     app_id, app_key = keys
-    age = f"&max_days_old={args.days}" if args.days else ""
+    age = f"&max_days_old={cfg.days}" if cfg.days else ""
     out = []
-    for q in args.keywords:
+    for q in cfg.keywords:
         got = 0
-        for page in range(1, max(1, min(args.pages, 10)) + 1):
-            data = fetch_json(ADZUNA_SEARCH.format(
+        for page in range(1, max(1, min(cfg.pages, 10)) + 1):
+            data = ctx.fetch.get_json(ADZUNA_SEARCH.format(
                 page=page, app_id=app_id, app_key=app_key,
                 phrase=urllib.parse.quote(q), extra="remote", age=age),
                 tries=2, headers=JSON_ONLY)
@@ -44,7 +43,7 @@ def crawl_adzuna(args):
             for j in results:
                 title = (j.get("title") or "").strip()
                 title = strip_tags(title)
-                if not relevant(title, args):
+                if not relevant(title, cfg.filters, "adzuna"):
                     continue
                 body = strip_tags(j.get("description") or "")
                 label = (j.get("location") or {}).get("display_name", "")

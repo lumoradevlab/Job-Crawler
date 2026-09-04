@@ -9,7 +9,6 @@ from ...filters.geo import us_status
 from ...filters.rules import relevant
 from ...filters.workplace import REMOTE_HINT
 from ...models import row
-from ...net.http import fetch
 from ...parse.dates import relative_date
 from ...parse.html import strip_tags
 
@@ -50,7 +49,7 @@ def builtin_us(location):
     return us_status(location)
 
 
-def crawl_builtin(args):
+def crawl_builtin(cfg, ctx):
     """Search the remote engineering board, one keyword at a time.
 
     The /jobs/remote/ path is not a remote guarantee — cards inside it still
@@ -58,12 +57,12 @@ def crawl_builtin(args):
     card is what decides.
     """
     jobs, seen = [], set()
-    for query in args.keywords:
+    for query in cfg.keywords:
         found = 0
-        for page in range(1, args.pages + 1):
+        for page in range(1, cfg.pages + 1):
             url = BUILTIN_URL + "?" + urllib.parse.urlencode(
                 {"search": query, "page": page})
-            cards = fetch(url).split(BI_CARD)[1:]
+            cards = ctx.fetch.get(url).split(BI_CARD)[1:]
             if not cards:
                 break
             for raw in cards:

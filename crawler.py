@@ -37,7 +37,7 @@ import sys
 import time  # noqa: F401  — patched as crawler.time.sleep by the tests
 import types
 
-from jobcrawler import cli, models
+from jobcrawler import cli, config, context, models
 from jobcrawler.cli import main
 from jobcrawler.filters import geo, rules, workplace
 from jobcrawler.filters.rules import _SKIPPED  # noqa: F401  — underscored
@@ -55,7 +55,8 @@ from jobcrawler.store import archive, seen
 
 # Order is only about which module a shared name is credited to; every
 # duplicate below is the same object imported twice, so nothing is shadowed.
-_REEXPORT = (http, html, text, salary, dates, models, workplace, geo, rules,
+_REEXPORT = (http, html, text, salary, dates, config, context, models,
+             workplace, geo, rules,
              seen, archive, dedupe, writers, boards, linkedin, greenhouse,
              ashby, lever, workable, smartrecruiters, discover, builtin, arc,
              wwr, hn, remotive, remoteok, arbeitnow, himalayas, base, adzuna,

@@ -4,18 +4,17 @@ import time
 import urllib.parse
 
 from ...models import row
-from ...net.http import fetch_json
 from ...parse.html import strip_tags
 
 
-def crawl_remotive(args):
+def crawl_remotive(cfg, ctx):
     """One request per query — 'search' takes a single string, not a list."""
     out, seen = [], set()
-    for query in args.keywords:
+    for query in cfg.keywords:
         url = "https://remotive.com/api/remote-jobs?" + urllib.parse.urlencode(
             {"search": query, "limit": 100}
         )
-        rows = (fetch_json(url) or {}).get("jobs", [])
+        rows = (ctx.fetch.get_json(url) or {}).get("jobs", [])
         print(f'[remotive] "{query}" -> {len(rows)} raw')
         for j in rows:
             jid = str(j.get("id", ""))

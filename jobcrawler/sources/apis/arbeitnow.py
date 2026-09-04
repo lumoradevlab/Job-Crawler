@@ -4,14 +4,13 @@ import time
 from datetime import datetime, timezone
 
 from ...models import row
-from ...net.http import fetch_json
 from ...parse.html import strip_tags
 
 
-def crawl_arbeitnow(args):
+def crawl_arbeitnow(cfg, ctx):
     out = []
-    for page in range(1, min(args.pages, 5) + 1):
-        data = fetch_json(
+    for page in range(1, min(cfg.pages, 5) + 1):
+        data = ctx.fetch.get_json(
             "https://www.arbeitnow.com/api/job-board-api?page=%d" % page) or {}
         rows = data.get("data", [])
         if not rows:

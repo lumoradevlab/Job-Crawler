@@ -5,7 +5,6 @@ import urllib.parse
 
 from ...filters.rules import relevant
 from ...models import row
-from ...net.http import fetch_json
 from ...parse.html import strip_tags
 from ...parse.salary import annualise
 from .base import need_keys
@@ -18,7 +17,7 @@ USAJOBS_SEARCH = ("https://data.usajobs.gov/api/search?Keyword={kw}"
                   "&ResultsPerPage=100&RemoteIndicator=true")
 
 
-def crawl_usajobs(args):
+def crawl_usajobs(cfg, ctx):
     """Federal postings. Low volume for mobile work — single digits is normal
     — but every hit is genuinely remote-flagged and unambiguously US."""
     keys = need_keys("usajobs", "USAJOBS_KEY", "USAJOBS_EMAIL")
@@ -30,8 +29,8 @@ def crawl_usajobs(args):
     headers = {"Host": "data.usajobs.gov", "User-Agent": email,
                "Authorization-Key": key, "Accept": "application/json"}
     out = []
-    for q in args.keywords:
-        data = fetch_json(USAJOBS_SEARCH.format(kw=urllib.parse.quote(q)),
+    for q in cfg.keywords:
+        data = ctx.fetch.get_json(USAJOBS_SEARCH.format(kw=urllib.parse.quote(q)),
                           tries=2, headers=headers)
         items = (((data or {}).get("SearchResult") or {})
                  .get("SearchResultItems") or [])
@@ -39,7 +38,7 @@ def crawl_usajobs(args):
         for it in items:
             j = it.get("MatchedObjectDescriptor") or {}
             title = (j.get("PositionTitle") or "").strip()
-            if not relevant(title, args):
+            if not relevant(title, cfg.filters, "usajobs"):
                 continue
             locs = [l.get("LocationName", "")
                     for l in (j.get("PositionLocation") or [])]

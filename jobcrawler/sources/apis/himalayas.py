@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from ...filters.geo import US_COUNTRY
 from ...filters.rules import relevant
 from ...models import row
-from ...net.http import fetch_json
 from ...parse.html import strip_tags
 
 
@@ -16,21 +15,21 @@ from ...parse.html import strip_tags
 HIMALAYAS_API = "https://himalayas.app/jobs/api?limit=100"
 
 
-def crawl_himalayas(args):
+def crawl_himalayas(cfg, ctx):
     # The feed is chronological with no keyword parameter and a hard 20 items
     # per page, so reaching an Android posting means walking a long way back:
     # --pages 5 covers 100 jobs of every discipline and finds nothing. Each
     # page here is worth a fifth of one elsewhere, so the budget is scaled.
-    out, cursor, pages = [], None, max(10, min(args.pages * 5, 50))
+    out, cursor, pages = [], None, max(10, min(cfg.pages * 5, 50))
     for _ in range(pages):
         url = HIMALAYAS_API + (f"&cursor={cursor}" if cursor else "")
-        data = fetch_json(url, tries=2) or {}
+        data = ctx.fetch.get_json(url, tries=2) or {}
         jobs = data.get("jobs") or []
         if not jobs:
             break
         for j in jobs:
             title = (j.get("title") or "").strip()
-            if not relevant(title, args):
+            if not relevant(title, cfg.filters, "himalayas"):
                 continue
             fences = [str(x) for x in (j.get("locationRestrictions") or [])]
             label = ", ".join(fences) if fences else "Anywhere"

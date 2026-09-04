@@ -29,7 +29,7 @@ def need_keys(name, *env):
     return None
 
 
-# fetch()'s default Accept offers text/html before JSON, and Adzuna honours
+# ctx.fetch.get()'s default Accept offers text/html before JSON, and Adzuna honours
 # that literally: the same URL that returns jobs to curl returns its HTML docs
 # page. Sources that content-negotiate need JSON asked for outright.
 JSON_ONLY = {"Accept": "application/json"}

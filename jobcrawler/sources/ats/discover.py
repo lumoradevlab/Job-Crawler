@@ -5,7 +5,6 @@ import re
 from datetime import datetime, timedelta
 from html import unescape
 
-from ...net.http import fetch_json
 from ...parse.text import COMPANY_NOISE
 from .ashby import ASHBY_BOARDS, ASHBY_LIST
 from .greenhouse import GH_LIST, GREENHOUSE_BOARDS
@@ -83,11 +82,11 @@ def slug_candidates(company):
     return [s for s in dict.fromkeys(out) if 2 <= len(s) <= 40]
 
 
-def probe_board(slug):
+def probe_board(slug, ctx):
     """Which ATS hosts this slug with live jobs, or None if none of them do."""
     for ats in PROBE_ORDER:
         url, jobs_of = BOARD_PROBES[ats]
-        if jobs_of(fetch_json(url.format(slug), tries=1, timeout=12)):
+        if jobs_of(ctx.fetch.get_json(url.format(slug), tries=1, timeout=12)):
             return ats
     return None
 
@@ -103,7 +102,7 @@ def known_slugs(boards):
                     for s in slugs}
 
 
-def discover_boards(companies, boards, today):
+def discover_boards(companies, boards, today, ctx):
     """Probe company names against every ATS and remember what answered."""
     found = boards.setdefault("found", {})
     missed = boards.setdefault("missed", {})
@@ -131,7 +130,8 @@ def discover_boards(companies, boards, today):
 
     hits = 0
     with futures.ThreadPoolExecutor(max_workers=4) as ex:
-        for slug, ats in zip(slugs, ex.map(probe_board, slugs)):
+        probe = lambda slug: probe_board(slug, ctx)
+        for slug, ats in zip(slugs, ex.map(probe, slugs)):
             if ats:
                 found.setdefault(ats, []).append(slug)
                 missed.pop(slug, None)

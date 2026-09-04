@@ -7,7 +7,6 @@ from ...filters.geo import us_status
 from ...filters.rules import relevant
 from ...filters.workplace import REMOTE_HINT, REMOTE_STRONG
 from ...models import row
-from ...net.http import fetch_json
 from ...parse.html import strip_tags
 from .boards import board_list
 
@@ -22,24 +21,24 @@ gopuff shieldai zoox ro anchorage cloudinary rigetti ledger
 LEVER_LIST = "https://api.lever.co/v0/postings/{}?mode=json"
 
 
-def crawl_lever(args):
+def crawl_lever(cfg, ctx):
     """One request per company; each posting arrives whole.
 
     Lever states the workplace outright in categories.commitment/workplaceType
     on modern boards, and buries it in the location label on older ones, so
     both are read before falling back to the description.
     """
-    boards = args.lever_boards or board_list("lever", LEVER_BOARDS, args)
+    boards = cfg.override_for("lever") or board_list("lever", LEVER_BOARDS, ctx)
     print(f"[lever] listing {len(boards)} company boards")
 
     def board(token):
-        data = fetch_json(LEVER_LIST.format(token), tries=2)
+        data = ctx.fetch.get_json(LEVER_LIST.format(token), tries=2)
         if not isinstance(data, list):
             return []
         out = []
         for j in data:
             title = (j.get("text") or "").strip()
-            if not relevant(title, args):
+            if not relevant(title, cfg.filters, "lever"):
                 continue
             cats = j.get("categories") or {}
             label = cats.get("location") or ""

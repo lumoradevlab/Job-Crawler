@@ -35,6 +35,25 @@ def make_args(**over):
     return Namespace(**base)
 
 
+def make_cfg(**over):
+    """A CrawlConfig for calling a source directly, with no CLI involved."""
+    filters = c.FilterConfig(**{k: over.pop(k) for k in list(over)
+                                if k in c.FilterConfig.__dataclass_fields__})
+    base = dict(keywords=("Android Developer",), pages=1,
+                location="United States")
+    base.update(over)
+    return c.CrawlConfig(filters=filters, **base)
+
+
+def make_ctx(fetch=None, **over):
+    """A RunContext whose Fetcher never reaches the network."""
+    return c.RunContext(fetch=fetch or c.Fetcher(opener=_no_network), **over)
+
+
+def _no_network(req, **kw):
+    raise AssertionError(f"a test tried to reach the network: {req.full_url}")
+
+
 def make_job(**over):
     """A record that passes every gate, so a test can spoil one field."""
     job = c.row("greenhouse", "Senior Android Engineer", "Acme",
@@ -424,10 +443,11 @@ class TestRelevant(unittest.TestCase):
         self.assertEqual(c._SKIPPED, [])
 
     def test_why_records_the_title_against_its_source(self):
+        # The source passes its own name rather than the gate reading a
+        # mutable "who is running now" field off shared state.
         args = make_args(why=True)
-        args.source_now = "ashby"
-        c.relevant("Account Executive", args)
-        c.relevant("Android Engineer", args)      # kept, so not recorded
+        c.relevant("Account Executive", args, "ashby")
+        c.relevant("Android Engineer", args, "ashby")   # kept, not recorded
         self.assertEqual(c._SKIPPED, [("ashby", "Account Executive")])
 
 
@@ -897,33 +917,35 @@ class TestCrawlSerpApi(unittest.TestCase):
     }
 
     def setUp(self):
-        self.real = c.fetch_json
-        self.real_sleep = c.time.sleep     # the paging courtesy pause
-        c.time.sleep = lambda _s: None
         self.urls = []
         os.environ["SERPAPI_KEY"] = "test-key"
         c._SKIPPED.clear()
 
     def tearDown(self):
-        c.fetch_json = self.real
-        c.time.sleep = self.real_sleep
         os.environ.pop("SERPAPI_KEY", None)
         c._SKIPPED.clear()
 
     def crawl(self, payloads, **over):
+        """Run the source against recorded payloads, with no network at all.
+
+        This used to work by reassigning the module-global fetch_json and
+        patching time.sleep. Both were symptoms: HTTP was a global the source
+        reached for, and pacing was a sleep inside the paging loop. Now the
+        source is handed a fetcher, so a test simply hands it a different one
+        — no globals touched, and nothing to restore in tearDown.
+        """
         queue = list(payloads)
 
-        def stub(url, **kw):
-            self.urls.append(url)
-            return queue.pop(0) if queue else None
+        class Recording:
+            urls = self.urls
 
-        c.fetch_json = stub
-        settings = dict(keywords=["Android Developer"], pages=1,
-                        location="United States")
-        settings.update(over)
-        args = make_args(**settings)
+            def get_json(_self, url, **kw):
+                self.urls.append(url)
+                return queue.pop(0) if queue else None
+
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            return c.crawl_serpapi(args), buf.getvalue()
+            jobs = c.crawl_serpapi(make_cfg(**over), make_ctx(fetch=Recording()))
+        return jobs, buf.getvalue()
 
     def test_the_mobile_roles_are_kept_and_the_others_are_not(self):
         jobs, _ = self.crawl([self.SAMPLE])
@@ -1040,19 +1062,18 @@ class TestSlugCandidates(unittest.TestCase):
 class TestBoardList(unittest.TestCase):
 
     def test_builtins_alone_when_nothing_discovered(self):
-        self.assertEqual(c.board_list("greenhouse", ["stripe"], make_args()),
+        self.assertEqual(c.board_list("greenhouse", ["stripe"], make_ctx()),
                          ["stripe"])
 
     def test_discovered_slugs_are_appended(self):
-        args = make_args()
-        args.boards_found = {"greenhouse": ["klaviyo"], "lever": ["gopuff"]}
-        self.assertEqual(c.board_list("greenhouse", ["stripe"], args),
+        ctx = make_ctx(boards_found={"greenhouse": ["klaviyo"],
+                                     "lever": ["gopuff"]})
+        self.assertEqual(c.board_list("greenhouse", ["stripe"], ctx),
                          ["stripe", "klaviyo"])
 
     def test_a_rediscovered_builtin_is_not_listed_twice(self):
-        args = make_args()
-        args.boards_found = {"greenhouse": ["stripe"]}
-        self.assertEqual(c.board_list("greenhouse", ["stripe"], args), ["stripe"])
+        ctx = make_ctx(boards_found={"greenhouse": ["stripe"]})
+        self.assertEqual(c.board_list("greenhouse", ["stripe"], ctx), ["stripe"])
 
     def test_known_slugs_covers_builtins_and_finds(self):
         known = c.known_slugs({"found": {"lever": ["wealthfront"]}})
@@ -1071,14 +1092,14 @@ class TestDiscoverBoards(unittest.TestCase):
         c.probe_board = self.real
 
     def stub(self, hosts):
-        def probe(slug):
+        def probe(slug, ctx):
             self.probed.append(slug)
             return hosts.get(slug)
         c.probe_board = probe
 
     def run_discovery(self, names, boards, today="2026-08-31"):
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            hits = c.discover_boards(names, boards, today)
+            hits = c.discover_boards(names, boards, today, make_ctx())
         return hits, buf.getvalue()
 
     def test_a_hit_is_recorded_under_its_ats(self):
@@ -1174,7 +1195,8 @@ class TestWiring(unittest.TestCase):
     def test_blocked_sources_explain_themselves_and_return_nothing(self):
         for name in c.BLOCKED:
             with self.subTest(source=name):
-                self.assertEqual(c.SOURCES[name](make_args()), [])
+                self.assertEqual(
+                    c.SOURCES[name](make_cfg(), make_ctx()), [])
 
 
 if __name__ == "__main__":

@@ -6,7 +6,6 @@ from datetime import datetime
 
 from ...filters.geo import us_status
 from ...models import row
-from ...net.http import fetch
 from ...parse.html import strip_tags
 
 
@@ -18,10 +17,10 @@ WWR_FEEDS = [
 ]
 
 
-def crawl_wwr(args):
+def crawl_wwr(cfg, ctx):
     jobs = []
     for feed in WWR_FEEDS:
-        xml = fetch(f"https://weworkremotely.com/categories/{feed}.rss")
+        xml = ctx.fetch.get(f"https://weworkremotely.com/categories/{feed}.rss")
         items = re.findall(r"<item>(.*?)</item>", xml, re.S)
         for it in items:
             def tag(name, block=it):

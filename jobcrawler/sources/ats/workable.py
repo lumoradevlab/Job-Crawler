@@ -6,7 +6,6 @@ from ...filters.geo import US_COUNTRY, us_status
 from ...filters.rules import relevant
 from ...filters.workplace import REMOTE_HINT
 from ...models import row
-from ...net.http import fetch_json
 from ...parse.html import strip_tags
 from .boards import board_list
 
@@ -26,17 +25,17 @@ productboard mews contentful staffbase
 WORKABLE_LIST = "https://apply.workable.com/api/v1/widget/accounts/{}"
 
 
-def crawl_workable(args):
-    boards = args.workable_boards or board_list("workable", WORKABLE_BOARDS, args)
+def crawl_workable(cfg, ctx):
+    boards = cfg.override_for("workable") or board_list("workable", WORKABLE_BOARDS, ctx)
     print(f"[workable] listing {len(boards)} company boards")
 
     def board(token):
-        data = fetch_json(WORKABLE_LIST.format(token), tries=2) or {}
+        data = ctx.fetch.get_json(WORKABLE_LIST.format(token), tries=2) or {}
         company = data.get("name") or token.title()
         out = []
         for j in data.get("jobs") or []:
             title = (j.get("title") or "").strip()
-            if not relevant(title, args):
+            if not relevant(title, cfg.filters, "workable"):
                 continue
             city = j.get("city") or ""
             country = j.get("country") or ""

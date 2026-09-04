@@ -6,7 +6,6 @@ from ...filters.geo import US_COUNTRY, us_status
 from ...filters.rules import relevant
 from ...filters.workplace import REMOTE_HINT
 from ...models import row
-from ...net.http import fetch_json
 from ...parse.html import strip_tags
 from .boards import board_list
 
@@ -44,24 +43,24 @@ def ashby_places(job):
     return " / ".join(dict.fromkeys(places)), countries
 
 
-def crawl_ashby(args):
+def crawl_ashby(cfg, ctx):
     """One request per company — the posting API returns the full postings.
 
     Unlike Greenhouse there is no second fetch per job: each record already
     carries its description, an isRemote flag and a per-country location
     list, which is the cleanest US signal any source here offers.
     """
-    boards = args.ashby_boards or board_list("ashby", ASHBY_BOARDS, args)
+    boards = cfg.override_for("ashby") or board_list("ashby", ASHBY_BOARDS, ctx)
     print(f"[ashby] listing {len(boards)} company boards")
 
     def board(token):
-        data = fetch_json(ASHBY_LIST.format(token), tries=2) or {}
+        data = ctx.fetch.get_json(ASHBY_LIST.format(token), tries=2) or {}
         out = []
         for j in data.get("jobs", []):
             if j.get("isListed") is False:
                 continue
             title = j.get("title", "").strip()
-            if not relevant(title, args):
+            if not relevant(title, cfg.filters, "ashby"):
                 continue
             label, countries = ashby_places(j)
             if countries:

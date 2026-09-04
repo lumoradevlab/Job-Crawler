@@ -6,7 +6,6 @@ from ...filters.geo import us_status
 from ...filters.rules import relevant
 from ...filters.workplace import REMOTE_HINT, REMOTE_STRONG
 from ...models import row
-from ...net.http import fetch_json
 from ...parse.html import strip_tags
 from ...store.seen import job_key
 from .boards import board_list
@@ -21,22 +20,22 @@ SR_LIST = ("https://api.smartrecruiters.com/v1/companies/{}/postings"
 SR_JOB = "https://api.smartrecruiters.com/v1/companies/{}/postings/{}"
 
 
-def crawl_smartrecruiters(args):
+def crawl_smartrecruiters(cfg, ctx):
     """Listing pages carry the location but not the body, so — as with
     Greenhouse — only the Android/mobile hits pay for a second request."""
-    boards = args.sr_boards or board_list("smartrecruiters", SMARTRECRUITERS_BOARDS, args)
+    boards = cfg.override_for("smartrecruiters") or board_list("smartrecruiters", SMARTRECRUITERS_BOARDS, ctx)
     print(f"[smartrecruiters] listing {len(boards)} company boards")
 
     def board(token):
         out, offset = [], 0
         while offset < 400:               # a company with more than 400 open
-            data = fetch_json(SR_LIST.format(token, offset), tries=2) or {}
+            data = ctx.fetch.get_json(SR_LIST.format(token, offset), tries=2) or {}
             batch = data.get("content") or []
             if not batch:
                 break
             for j in batch:
                 title = (j.get("name") or "").strip()
-                if not relevant(title, args):
+                if not relevant(title, cfg.filters, "smartrecruiters"):
                     continue
                 loc = j.get("location") or {}
                 label = ", ".join(x for x in (loc.get("city"), loc.get("region"),
@@ -66,11 +65,11 @@ def crawl_smartrecruiters(args):
         for res in ex.map(board, boards):
             listed.extend(res)
 
-    known = getattr(args, "seen_keys", set())
+    known = ctx.seen_keys
     hits = [j for j in listed if job_key(j) not in known]
 
     def detail(j):
-        data = fetch_json(SR_JOB.format(j.pop("sr_token"), j.pop("sr_id")),
+        data = ctx.fetch.get_json(SR_JOB.format(j.pop("sr_token"), j.pop("sr_id")),
                           tries=2)
         if data:
             ad = (data.get("jobAd") or {}).get("sections") or {}

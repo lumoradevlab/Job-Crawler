@@ -13,7 +13,7 @@ BLOCKED = {
 
 
 def crawl_blocked(name):
-    def _fn(args):
+    def _fn(cfg, ctx):
         print(f"[{name}] unavailable: {BLOCKED[name]}")
         return []
     return _fn

@@ -4,10 +4,12 @@ import argparse
 import sys
 from datetime import datetime
 
+from .config import CrawlConfig, FilterConfig
+from .context import RunContext
 from .filters.geo import us_status
 from .filters.rules import rejection
-from .net import http
-from .net.ratelimit import HostPolicy
+from .net.http import Fetcher
+from .net.ratelimit import HostPolicy, RateLimiter
 from .models import row  # noqa: F401  (kept on the module for the shim)
 from .pipeline.dedupe import SOURCE_RANK, dedupe_key
 from .report.writers import (SALARY_FIELDS, report_rejections,
@@ -29,6 +31,57 @@ DEFAULT_QUERIES = [
     "Mobile Software Engineer",
     "Senior Android Developer",
 ]
+
+
+def build(args, days, today, state, boards_found):
+    """Turn the parsed flags into the two objects a source is handed.
+
+    This is the only place that reads an argparse Namespace. Everything
+    downstream takes a CrawlConfig and a RunContext, which is what lets a
+    source be called from a test with two small objects and no CLI at all.
+    """
+    filters = FilterConfig(
+        no_filter=args.no_filter,
+        must=tuple(args.must) if args.must else None,
+        exclude=tuple(args.exclude) if args.exclude else None,
+        easy_apply_only=args.easy_apply_only,
+        anywhere=args.anywhere,
+        strict_us=args.strict_us,
+        days=days,
+        why=args.why,
+        min_salary=args.min_salary,
+    )
+    cfg = CrawlConfig(
+        keywords=tuple(args.keywords),
+        sources=tuple(args.source),
+        location=args.location,
+        pages=args.pages,
+        days=days,
+        level=args.level,
+        delay=args.delay,
+        details=args.details,
+        discover=args.discover,
+        boards={"greenhouse": tuple(args.boards or ()),
+                "ashby": tuple(args.ashby_boards or ()),
+                "lever": tuple(args.lever_boards or ()),
+                "workable": tuple(args.workable_boards or ()),
+                "smartrecruiters": tuple(args.sr_boards or ())},
+        filters=filters,
+    )
+
+    # --delay is LinkedIn's pacing and always was; it now reaches the request
+    # layer as that host's policy instead of a sleep at the bottom of a loop.
+    limiter = RateLimiter()
+    limiter.set_policy("www.linkedin.com",
+                       HostPolicy(gap=cfg.delay, jitter=1.5))
+    ctx = RunContext(
+        fetch=Fetcher(limiter=limiter),
+        today=today,
+        seen_keys=set() if args.include_seen else {k for k in state
+                                                  if k != META},
+        boards_found=boards_found,
+    )
+    return cfg, ctx
 
 
 def report_network(stats, kept):
@@ -180,11 +233,6 @@ def main():
     if args.anywhere and args.location == "United States":
         args.location = "Worldwide"
 
-    # --delay is LinkedIn's pacing and always was; it now reaches the request
-    # layer as that host's policy instead of a sleep at the bottom of a loop.
-    http.DEFAULT.limiter.set_policy(
-        "www.linkedin.com", HostPolicy(gap=args.delay, jitter=1.5))
-
     # Load the history before crawling, so the sources can narrow their own
     # work: a shorter date window, and no detail fetches for known jobs.
     state = {} if args.reset_seen else load_state(state_path)
@@ -194,15 +242,13 @@ def main():
     # lists by board_list() before any ATS source starts listing.
     boards_path = args.out + "_boards.json"
     boards = load_state(boards_path)
-    args.boards_found = boards.get("found", {})
-    grown = sum(len(v) for v in args.boards_found.values())
+    boards_found = boards.get("found", {})
+    grown = sum(len(v) for v in boards_found.values())
     if grown:
         print(f"{grown} discovered board{'' if grown == 1 else 's'} "
               f"from {boards_path}")
-    args.seen_keys = set() if args.include_seen else {
-        k for k in state if k != META
-    }
 
+    days = args.days
     # A replay re-filters what is already on disk; narrowing the window to
     # "since the last run" would silently hide almost all of it.
     if not args.full and args.days and not args.replay:
@@ -211,7 +257,10 @@ def main():
             print(f"catching up: asking for the last {narrowed} days instead "
                   f"of {args.days} (last run {state[META]['last_run']}); "
                   f"--full re-sweeps the whole window")
-            args.days = narrowed
+            days = narrowed
+
+    cfg, ctx = build(args, days, today, state, boards_found)
+    filters = cfg.filters
 
     archive_path = args.out + "_archive.jsonl"
 
@@ -222,14 +271,13 @@ def main():
         # nothing at all here, since the archive is by definition seen.
         collected = load_archive(archive_path)
         args.include_seen = True
-        args.seen_keys = set()
+        ctx.seen_keys = set()
         print(f"replaying {len(collected)} archived postings from "
               f"{archive_path} — nothing will be fetched")
     else:
-        for name in args.source:
-            args.source_now = name      # tags what relevant() turns away
+        for name in cfg.sources:
             try:
-                collected.extend(SOURCES[name](args))
+                collected.extend(SOURCES[name](cfg, ctx))
             except KeyboardInterrupt:
                 print("\ninterrupted — writing what we have")
                 break
@@ -243,7 +291,7 @@ def main():
         names = [j["company"] for j in collected]
         names += [v.get("company", "") for k, v in state.items()
                   if k != META and isinstance(v, dict)]
-        discover_boards(names, boards, today)
+        discover_boards(names, boards, today, ctx)
         boards[META] = {"last_run": today}
         save_state(boards_path, boards)
 
@@ -254,9 +302,9 @@ def main():
     # arrival order.
     best, rejected = {}, []
     for j in collected:
-        why = rejection(j, args)
+        why = rejection(j, filters)
         if why:
-            if args.why:
+            if filters.why:
                 rejected.append((j, why))
             continue
         j["us"] = j.get("us") or us_status(j.get("location", ""))
@@ -268,7 +316,7 @@ def main():
             if prior and prior.get("salary_min") and not j.get("salary_min"):
                 for f in SALARY_FIELDS:
                     j[f] = prior[f]
-            if prior is not None and args.why:
+            if prior is not None and filters.why:
                 rejected.append((prior, "duplicate: %s carries the same job "
                                         "on a better link" % j["source"]))
             best[key] = j
@@ -276,15 +324,15 @@ def main():
             if prior.get("salary_min") is None and j.get("salary_min"):
                 for f in SALARY_FIELDS:
                     prior[f] = j[f]
-            if args.why:
+            if filters.why:
                 rejected.append((j, "duplicate: kept the %s record instead"
                                     % prior["source"]))
     jobs = list(best.values())
 
-    if args.min_salary:
+    if filters.min_salary:
         jobs = [j for j in jobs
                 if not j.get("salary_max")
-                or (j.get("salary_max") or 0) >= args.min_salary]
+                or (j.get("salary_max") or 0) >= filters.min_salary]
     jobs.sort(key=lambda j: (j.get("posted") or "", j["source"]), reverse=True)
 
     # Split into new vs already-reported, then remember everything we saw.
@@ -306,7 +354,7 @@ def main():
         for j in jobs:
             state[job_key(j)] = {"first_seen": j["first_seen"],
                                  "title": j["title"], "company": j["company"]}
-        state[META] = {"last_run": today, "window_days": args.days}
+        state[META] = {"last_run": today, "window_days": cfg.days}
         save_state(state_path, state)
 
     if not args.include_seen:
@@ -332,8 +380,8 @@ def main():
               f'"worldwide"/unlabelled (use --strict-us to drop those)')
     if args.details:
         print(f"  {sum(1 for j in jobs if j['easy_apply'] == 'yes')} are Easy Apply")
-    report_network(http.DEFAULT.stats, len(jobs))
-    if args.why:
+    report_network(ctx.fetch.stats, len(jobs))
+    if filters.why:
         report_rejections(rejected, args.out)
     print()
 
