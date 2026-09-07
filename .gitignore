@@ -20,3 +20,9 @@ build/
 dist/
 .venv/
 venv/
+
+# Credentials. Never committed — the bot reads them from the environment,
+# and .env is only a convenience for setting them locally.
+.env
+.env.*
+!.env.example
