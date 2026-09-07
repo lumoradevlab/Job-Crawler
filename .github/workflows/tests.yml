@@ -30,6 +30,7 @@ jobs:
           python test_crawler.py
           python test_net.py
           python test_pipeline.py
+          python test_notify.py
 
       - name: The package imports and the CLI answers
         run: |

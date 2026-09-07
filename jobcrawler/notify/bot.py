@@ -1,0 +1,263 @@
+"""The Telegram bot: one crawl, then the new postings sent to a chat.
+
+Deliberately a wrapper around the ordinary run rather than a parallel one.
+Everything that decides what a "new job" is — the title gate, the US rules,
+the dedupe, the seen-state — already exists and is tested; a bot that made
+any of those decisions again would be a second implementation to keep in
+step with the first. So this runs the pipeline, takes what split_new()
+returns, and sends that.
+
+Ordering matters here and is the one thing worth reading twice. The state
+file is written only *after* Telegram has accepted the messages. Written
+first, a failed send would mark the jobs as reported and they would never be
+sent again — the bot would go quiet and look healthy. Written after, a failed
+send means the next run finds the same jobs still new and tries once more.
+The cost is a possible duplicate if the process dies between sending and
+saving, and a duplicate posting is a far better failure than a silent one.
+"""
+
+import argparse
+import os
+import sys
+from datetime import datetime
+
+from ..config import CrawlConfig, FilterConfig
+from ..context import RunContext
+from ..net.http import Fetcher
+from ..net.ratelimit import HostPolicy, RateLimiter
+from ..pipeline.collect import collect
+from ..pipeline.select import select, split_new
+from ..report.events import Reporter
+from ..sources.registry import SOURCES
+from ..store.archive import Archive
+from ..store.seen import (catchup_days, job_key, load_state, record_run,
+                          save_state)
+from .secrets import load_env_file, redact
+from .telegram import TelegramError, TelegramNotifier
+
+# The schedule's sources: every one that is a documented API needing no key,
+# plus Adzuna, which is the only source here carrying real salary data.
+#
+# Absent on purpose:
+#   serpapi  — 250 searches a MONTH free, and one run of 8 keywords spends 8.
+#              Twice a day would cost ~480 and break the tier in a fortnight.
+#   linkedin — an HTML scrape of the guest endpoint. It works, but polling it
+#              on a schedule is what gets an IP throttled, and its links rank
+#              last in the dedupe anyway.
+#   builtin, arc — HTML scrapes; they break on a markup change, and a bot
+#              that breaks quietly is worse than one source fewer.
+# Any of them can still be asked for explicitly with --source.
+BOT_SOURCES = [
+    "greenhouse", "ashby", "lever", "workable", "smartrecruiters",
+    "himalayas", "remotive", "remoteok", "arbeitnow", "wwr", "hn",
+    "adzuna",
+]
+
+DEFAULT_QUERIES = [
+    "Android Developer", "Android Engineer", "Mobile Developer",
+    "Mobile Engineer", "Android Software Engineer", "Kotlin Developer",
+    "Mobile Software Engineer", "Senior Android Developer",
+]
+
+# Sending 40 messages because someone deleted the state file is how a bot
+# gets muted. Past this many, the run says so and sends nothing rather than
+# flooding the chat; --max-messages 0 turns the guard off.
+DEFAULT_MAX_MESSAGES = 25
+
+
+def parser():
+    p = argparse.ArgumentParser(
+        prog="jobcrawler-bot",
+        description="Crawl, then post any new jobs to a Telegram chat.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+credentials (environment variables, or a git-ignored .env beside this repo):
+  TELEGRAM_BOT_TOKEN   from @BotFather on Telegram
+  TELEGRAM_CHAT_ID     the chat to post into; --chat-id-help explains how
+  ADZUNA_APP_ID        optional, free at developer.adzuna.com/signup
+  ADZUNA_APP_KEY       optional, the key for that app id
+
+examples:
+  jobcrawler-bot --dry-run        # crawl and print, send nothing
+  jobcrawler-bot --check          # verify the token and chat, then stop
+  jobcrawler-bot                  # the real thing, as the schedule runs it
+""")
+    p.add_argument("-k", "--keywords", nargs="+", metavar="QUERY",
+                   default=DEFAULT_QUERIES,
+                   help="search queries (default: 8 mobile/Android variants)")
+    p.add_argument("--source", nargs="+", choices=sorted(SOURCES),
+                   default=BOT_SOURCES, metavar="NAME",
+                   help="default: every keyless API plus adzuna")
+    p.add_argument("-d", "--days", type=int, default=14,
+                   help="only postings from the last N days (default 14); "
+                        "after the first run the window shrinks to the gap "
+                        "since it")
+    p.add_argument("-p", "--pages", type=int, default=3,
+                   help="pages per query where a source pages (default 3)")
+    p.add_argument("--strict-us", action="store_true",
+                   help="require the posting to name the US")
+    p.add_argument("--anywhere", action="store_true",
+                   help="turn the US gate off entirely")
+    p.add_argument("--min-salary", type=int, metavar="N",
+                   help="drop postings whose stated pay is below N")
+    p.add_argument("--exclude", nargs="+", metavar="WORD",
+                   help="drop jobs whose title contains any of these")
+    p.add_argument("-o", "--out", default="android_remote_jobs",
+                   help="output basename, shared with the main crawler")
+    p.add_argument("--state", metavar="FILE",
+                   help="seen-job history file (default <out>_seen.json)")
+    p.add_argument("--max-messages", type=int, default=DEFAULT_MAX_MESSAGES,
+                   metavar="N",
+                   help="refuse to send more than N in one run, so a lost "
+                        "state file cannot flood the chat (0 = no limit)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="crawl and print what would be sent, send nothing")
+    p.add_argument("--check", action="store_true",
+                   help="verify the credentials and exit without crawling")
+    p.add_argument("--chat-id-help", action="store_true",
+                   help="explain how to find your TELEGRAM_CHAT_ID")
+    p.add_argument("-q", "--quiet", action="store_true",
+                   help="print only results and warnings")
+    return p
+
+
+CHAT_ID_HELP = """
+Finding your TELEGRAM_CHAT_ID
+-----------------------------
+1. In Telegram, message @BotFather and send /newbot. Follow the prompts.
+   It replies with a token like 8123456789:AAH...  -> TELEGRAM_BOT_TOKEN
+
+2. Send your new bot any message ("hi") from the chat you want jobs in.
+   A bot cannot message you first; this is what opens the conversation.
+
+3. Ask the API who has talked to it:
+
+     curl "https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates"
+
+   In the reply find  "chat":{"id":123456789  -> TELEGRAM_CHAT_ID
+   A personal chat id is positive; a group's is negative (-100...).
+
+4. For a group: add the bot to it, send a message there, and re-run the
+   curl above. Group ids start with -100.
+
+Never commit these. Put them in .env locally (it is git-ignored), and in
+GitHub Actions store them under Settings -> Secrets and variables -> Actions.
+"""
+
+
+def build(args, report, days, today, state):
+    """The two objects every source is handed. No argparse past this point."""
+    filters = FilterConfig(
+        exclude=tuple(args.exclude) if args.exclude else None,
+        anywhere=args.anywhere,
+        strict_us=args.strict_us,
+        days=days,
+        min_salary=args.min_salary,
+    )
+    cfg = CrawlConfig(
+        keywords=tuple(args.keywords),
+        sources=tuple(args.source),
+        location="Worldwide" if args.anywhere else "United States",
+        pages=args.pages,
+        days=days,
+        filters=filters,
+    )
+    limiter = RateLimiter(default=HostPolicy(gap=0.0))
+    ctx = RunContext(fetch=Fetcher(limiter=limiter, report=report),
+                     report=report, today=today,
+                     seen_keys={k for k in state if not k.startswith("_")})
+    return cfg, ctx
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
+
+    if args.chat_id_help:
+        print(CHAT_ID_HELP)
+        return 0
+
+    load_env_file()
+    report = Reporter(quiet=args.quiet)
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+    notifier = None
+    if not args.dry_run:
+        try:
+            notifier = TelegramNotifier(token, chat_id, report=report)
+            who = notifier.check()
+            report.line(f"telegram: @{who} -> chat {chat_id} "
+                        f"(token {redact(token)})")
+        except TelegramError as e:
+            report.warn(f"! telegram unavailable: {e}")
+            report.warn("  run --chat-id-help for how to get these")
+            return 2
+    if args.check:
+        return 0
+
+    state_path = args.state or (args.out + "_seen.json")
+    state = load_state(state_path)
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # The same catch-up the crawler does: after the first sweep there is no
+    # reason to ask for 14 days again, only for what appeared since.
+    days = catchup_days(state, args.days, today, args.source)
+    cfg, ctx = build(args, report, days, today, state)
+
+    outcome = collect(cfg, ctx, SOURCES)
+    jobs, _ = select(outcome.postings, cfg.filters)
+    fresh = split_new(jobs, state, today)
+
+    # Archived before anything is sent: the archive is the only full record,
+    # and a Telegram failure is no reason to lose the crawl.
+    archive = Archive(args.out + "_archive.jsonl")
+    archive.add(jobs)
+
+    report.result(f"\n{len(jobs)} matched, {len(fresh)} new since the last run")
+
+    if not fresh:
+        # Still record the run: the sources that worked have been asked for
+        # this window, and not advancing them means re-asking tomorrow.
+        record_run(state, today, cfg.days, outcome.succeeded)
+        save_state(state_path, state)
+        report.result("nothing new to send")
+        return 0
+
+    if args.max_messages and len(fresh) > args.max_messages:
+        report.warn(f"! {len(fresh)} new postings exceeds --max-messages "
+                    f"{args.max_messages} — sending none.")
+        report.warn("  this usually means the state file was lost. Re-run "
+                    "with --max-messages 0 to send them all, or --dry-run "
+                    "to look first.")
+        return 3
+
+    if args.dry_run:
+        from .telegram import format_posting
+        for j in fresh:
+            report.result("-" * 60)
+            report.result(format_posting(j))
+        report.result("-" * 60)
+        report.result(f"{len(fresh)} message(s) would be sent. "
+                      f"Nothing was sent and no state was written.")
+        return 0
+
+    sent = notifier.send_postings(fresh)
+    report.result(f"sent {sent} of {len(fresh)} to telegram")
+
+    # Only now. A job is "reported" when Telegram has it, not when we decided
+    # to send it — see the module docstring.
+    if sent:
+        for j in jobs:
+            state[job_key(j)] = {"first_seen": j.first_seen,
+                                 "title": j.title, "company": j.company}
+        record_run(state, today, cfg.days, outcome.succeeded)
+        save_state(state_path, state)
+    else:
+        report.warn("! nothing was sent, so the state file was left alone — "
+                    "the next run will try these again")
+        return 4
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

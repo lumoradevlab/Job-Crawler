@@ -1,0 +1,73 @@
+name: telegram job bot
+
+# Twice a day, at 13:00 and 01:00 UTC — roughly 6am and 6pm US Pacific.
+# GitHub runs scheduled jobs on a shared queue and can start them late by
+# several minutes; nothing here depends on the exact minute.
+on:
+  schedule:
+    - cron: "0 13 * * *"
+    - cron: "0 1 * * *"
+  # So a run can be triggered by hand from the Actions tab — useful for the
+  # first run, and for checking credentials after rotating a key.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Crawl and log what would be sent, without sending"
+        type: boolean
+        default: false
+
+# Two runs at once would crawl the same jobs and race on the state file,
+# which is how a posting gets sent twice. A late run waits for the one ahead.
+concurrency:
+  group: telegram-job-bot
+  cancel-in-progress: false
+
+jobs:
+  crawl-and-notify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The whole bot rests on knowing which jobs it has already sent, and an
+      # Actions runner is destroyed after every run. Without this the state
+      # file starts empty each time, every posting looks new, and the chat
+      # gets the same jobs twice a day forever.
+      #
+      # The cache key changes every run so each run writes a fresh entry;
+      # restore-keys then matches the most recent previous one, which is how
+      # a cache is used as a rolling store rather than an immutable one.
+      - name: Restore the seen-job history
+        uses: actions/cache@v4
+        with:
+          path: |
+            android_remote_jobs_seen.json
+            android_remote_jobs_archive.jsonl
+          key: jobcrawler-state-${{ github.run_id }}
+          restore-keys: |
+            jobcrawler-state-
+
+      - name: Install the package
+        run: pip install .
+
+      - name: Crawl and post new jobs
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+        run: |
+          jobcrawler-bot \
+            ${{ inputs.dry_run && '--dry-run' || '' }} \
+            --days 14 \
+            --max-messages 25
+
+      # The state file is only useful to the *next* run, and the cache above
+      # saves it automatically at the end of a successful job. Nothing to do
+      # here — this comment exists so the absence is deliberate, not missing.
