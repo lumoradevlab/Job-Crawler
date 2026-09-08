@@ -35,22 +35,29 @@ from ..store.seen import (catchup_days, job_key, load_state, record_run,
 from .secrets import load_env_file, redact
 from .telegram import TelegramError, TelegramNotifier
 
-# The schedule's sources: every one that is a documented API needing no key,
-# plus Adzuna, which is the only source here carrying real salary data.
+# The schedule's sources: every documented API needing no key, plus Adzuna
+# for its salary data, plus LinkedIn and Built In.
 #
-# Absent on purpose:
-#   serpapi  — 250 searches a MONTH free, and one run of 8 keywords spends 8.
-#              Twice a day would cost ~480 and break the tier in a fortnight.
-#   linkedin — an HTML scrape of the guest endpoint. It works, but polling it
-#              on a schedule is what gets an IP throttled, and its links rank
-#              last in the dedupe anyway.
-#   builtin, arc — HTML scrapes; they break on a markup change, and a bot
-#              that breaks quietly is worse than one source fewer.
-# Any of them can still be asked for explicitly with --source.
+# Those last two are HTML scrapes rather than APIs, which is a real
+# difference and worth stating. An API changes behind a version; a scrape
+# changes whenever the site's markup does, and the failure is silent — the
+# patterns simply stop matching and the source reports zero. collect()
+# isolates that (a broken source cannot take the run down) and its clock is
+# not advanced (so its window is still there when it is fixed), but nothing
+# can make a scrape as durable as an endpoint with a contract.
+#
+# LinkedIn additionally throttles by IP, and an Actions runner shares its
+# address with everything else GitHub runs — so expect it to return less
+# there than it does from a laptop. That is throttling, not breakage.
+#
+# Still absent: serpapi, whose free tier is 250 searches a MONTH and would
+# not survive a fortnight of twice-daily runs at 8 keywords; and arc, which
+# is a third scrape whose postings overlap heavily with what is already here.
+# Both can still be asked for explicitly with --source.
 BOT_SOURCES = [
     "greenhouse", "ashby", "lever", "workable", "smartrecruiters",
     "himalayas", "remotive", "remoteok", "arbeitnow", "wwr", "hn",
-    "adzuna",
+    "adzuna", "linkedin", "builtin",
 ]
 
 DEFAULT_QUERIES = [
@@ -94,6 +101,10 @@ examples:
                         "since it")
     p.add_argument("-p", "--pages", type=int, default=3,
                    help="pages per query where a source pages (default 3)")
+    p.add_argument("--delay", type=float, default=4.0, metavar="SECONDS",
+                   help="seconds between LinkedIn requests (default 4). "
+                        "LinkedIn throttles by IP; lowering this is what "
+                        "gets a run half-empty")
     p.add_argument("--strict-us", action="store_true",
                    help="require the posting to name the US")
     p.add_argument("--anywhere", action="store_true",
@@ -160,9 +171,19 @@ def build(args, report, days, today, state):
         location="Worldwide" if args.anywhere else "United States",
         pages=args.pages,
         days=days,
+        delay=args.delay,
         filters=filters,
     )
-    limiter = RateLimiter(default=HostPolicy(gap=0.0))
+    # RateLimiter() with no arguments carries DEFAULT_POLICIES, which is
+    # where LinkedIn's several-second gap lives. Passing a default= here
+    # instead — as this did — replaced the fallback for unnamed hosts and
+    # left the named ones alone, but it read like "no pacing anywhere" and
+    # would have become exactly that the moment someone passed policies=.
+    # With LinkedIn now on the schedule the pacing is load-bearing, so it is
+    # built the way cli.py builds it, and --delay moves the same knob.
+    limiter = RateLimiter()
+    limiter.set_policy("www.linkedin.com",
+                       HostPolicy(gap=args.delay, jitter=1.5))
     ctx = RunContext(fetch=Fetcher(limiter=limiter, report=report),
                      report=report, today=today,
                      seen_keys={k for k in state if not k.startswith("_")})

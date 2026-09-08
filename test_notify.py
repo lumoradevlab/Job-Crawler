@@ -129,6 +129,85 @@ class TestSend(unittest.TestCase):
 
 
 # ==========================================================================
+# What the schedule crawls, and how hard it hits it
+# ==========================================================================
+class TestBotSources(unittest.TestCase):
+
+    def test_every_scheduled_source_is_a_real_one(self):
+        from jobcrawler.notify.bot import BOT_SOURCES
+        unknown = [s for s in BOT_SOURCES if s not in c.SOURCES]
+        self.assertEqual(unknown, [], f"not in the registry: {unknown}")
+
+    def test_serpapi_is_never_on_the_schedule(self):
+        # 250 searches a MONTH free; one run of 8 keywords spends 8. Twice
+        # daily is ~480 a month, so this would break the tier in a fortnight.
+        from jobcrawler.notify.bot import BOT_SOURCES
+        self.assertNotIn("serpapi", BOT_SOURCES)
+
+    def test_no_blocked_source_is_on_the_schedule(self):
+        from jobcrawler.notify.bot import BOT_SOURCES
+        from jobcrawler.sources.blocked import BLOCKED
+        self.assertEqual([s for s in BOT_SOURCES if s in BLOCKED], [])
+
+    def test_linkedin_keeps_its_pacing(self):
+        # The bot built RateLimiter(default=HostPolicy(gap=0.0)), which reads
+        # as "no pacing" and would become exactly that if policies= were ever
+        # passed. LinkedIn throttles by IP, so its several-second gap has to
+        # survive however the limiter is constructed.
+        from jobcrawler.notify.bot import build, parser
+        args = parser().parse_args([])
+        _, ctx = build(args, c.NullReporter(), 14, "2026-09-07", {})
+        policy = ctx.fetch.limiter.policy_for(
+            "https://www.linkedin.com/jobs-guest/jobs/api/search")
+        self.assertGreaterEqual(policy.gap, 3.0)
+
+    def test_the_delay_flag_reaches_linkedins_policy(self):
+        from jobcrawler.notify.bot import build, parser
+        args = parser().parse_args(["--delay", "9"])
+        _, ctx = build(args, c.NullReporter(), 14, "2026-09-07", {})
+        self.assertEqual(ctx.fetch.limiter.policy_for(
+            "https://www.linkedin.com/x").gap, 9.0)
+
+    def test_the_ats_boards_are_still_unpaced(self):
+        # The ATS crawls run a six-worker pool against APIs built to be
+        # polled; pacing them would turn a 46-board sweep into minutes.
+        from jobcrawler.notify.bot import build, parser
+        args = parser().parse_args([])
+        _, ctx = build(args, c.NullReporter(), 14, "2026-09-07", {})
+        self.assertEqual(ctx.fetch.limiter.policy_for(
+            "https://boards-api.greenhouse.io/v1/boards/x/jobs").gap, 0.0)
+
+
+# ==========================================================================
+# The scrape sources, whose last line only runs after a successful crawl
+# ==========================================================================
+class TestScrapeSources(unittest.TestCase):
+
+    def test_builtin_summarises_without_subscripting_a_posting(self):
+        # builtin.py ended with `j['remote']`, left behind when the record
+        # became a Posting. It is the last line of the function, so it only
+        # ever runs after a crawl succeeds — no offline test reached it, and
+        # the source died with a TypeError the moment Built In answered.
+        from jobcrawler.sources.boards.builtin import crawl_builtin
+
+        page = ('<div data-id="job-card" data-alias="acme">'
+                '<a data-id="job-card-title">Senior Android Engineer</a>'
+                '<div data-id="company-title"><span>Acme</span></div>'
+                '</div>')
+
+        class OnePage:
+            def get(self, url, **kw):
+                return page
+
+            def get_json(self, url, **kw):
+                return {}
+
+        ctx = c.RunContext(fetch=OnePage(), report=c.NullReporter())
+        cfg = c.CrawlConfig(keywords=("Android Developer",))
+        crawl_builtin(cfg, ctx)   # the assertion is that this does not raise
+
+
+# ==========================================================================
 # Credentials
 # ==========================================================================
 class TestSecrets(unittest.TestCase):
