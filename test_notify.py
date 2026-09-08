@@ -208,6 +208,121 @@ class TestScrapeSources(unittest.TestCase):
 
 
 # ==========================================================================
+# The flood guard, and the backfill it has to tell apart from a lost file
+# ==========================================================================
+class TestFloodGuard(unittest.TestCase):
+    """--max-messages against --newest, exercised through main().
+
+    Driven end to end with a stub source rather than by calling the guard
+    directly: what matters is not which branch runs but what ends up in the
+    state file afterwards, and only main() writes that.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+        self.out = os.path.join(self.dir, "run")
+        self.sent = []
+
+        import jobcrawler.notify.bot as bot
+        self.bot = bot
+        self._saved_sources = dict(bot.SOURCES)
+        self._saved_notifier = bot.TelegramNotifier
+
+        # 40 postings that must survive select() intact: distinct companies
+        # so dedupe_key() cannot collapse them, and distinct dates so the
+        # newest-N slice has a defined answer. Dates descend from 2026-08-31
+        # (jobs 1..28) into July, keeping every one inside a 60-day window.
+        made = []
+        for i in range(40):
+            day = 31 - i
+            date = (f"2026-08-{day:02d}" if day >= 1
+                    else f"2026-07-{31 + day:02d}")
+            made.append(c.row("greenhouse", f"Android Engineer {i}",
+                              f"Company{i}", "Remote - US",
+                              f"https://x.example/{i}", date))
+        bot.SOURCES.clear()
+        bot.SOURCES["greenhouse"] = lambda cfg, ctx: list(made)
+
+        outer = self
+
+        class Stub:
+            def __init__(self, *a, **k):
+                pass
+
+            def check(self):
+                return "stubbot"
+
+            def send_postings(self, jobs):
+                outer.sent.extend(jobs)
+                return len(jobs)
+
+        bot.TelegramNotifier = Stub
+        # Restored in tearDown: leaking these into the real environment is
+        # what made an unrelated secrets test read 't' as its token.
+        self._saved_env = dict(os.environ)
+        os.environ["TELEGRAM_BOT_TOKEN"] = "t"
+        os.environ["TELEGRAM_CHAT_ID"] = "1"
+
+    def tearDown(self):
+        import shutil
+        self.bot.SOURCES.clear()
+        self.bot.SOURCES.update(self._saved_sources)
+        self.bot.TelegramNotifier = self._saved_notifier
+        os.environ.clear()
+        os.environ.update(self._saved_env)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _run(self, *extra):
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self._main(*extra)
+
+    def _main(self, *extra):
+        return self.bot.main(["--source", "greenhouse", "-o", self.out,
+                              "--days", "0",
+                              "--state", self.out + "_seen.json", "-q"]
+                             + list(extra))
+
+    def _seen(self):
+        import json
+        with open(self.out + "_seen.json") as fh:
+            return [k for k in json.load(fh) if not k.startswith("_")]
+
+    def test_too_many_sends_none_and_writes_no_state(self):
+        # The default: a big batch is assumed to be a lost state file, and
+        # sending nothing is what makes that recoverable.
+        self.assertEqual(self._run("--max-messages", "10"), 3)
+        self.assertEqual(self.sent, [])
+        self.assertFalse(os.path.exists(self.out + "_seen.json"))
+
+    def test_newest_sends_exactly_the_limit(self):
+        self.assertEqual(self._run("--max-messages", "10", "--newest"), 0)
+        self.assertEqual(len(self.sent), 10)
+
+    def test_newest_sends_the_newest_ones(self):
+        self._run("--max-messages", "5", "--newest")
+        dates = [j.posted for j in self.sent]
+        self.assertEqual(dates, sorted(dates, reverse=True))
+
+    def test_the_held_back_ones_are_marked_seen_not_resent(self):
+        # The whole point: they must not come back as "new" tomorrow.
+        self._run("--max-messages", "10", "--newest")
+        self.assertEqual(len(self._seen()), 40)
+        self.sent.clear()
+        self.assertEqual(self._run("--max-messages", "10", "--newest"), 0)
+        self.assertEqual(self.sent, [])
+
+    def test_under_the_limit_newest_changes_nothing(self):
+        self.assertEqual(self._run("--max-messages", "100", "--newest"), 0)
+        self.assertEqual(len(self.sent), 40)
+
+    def test_zero_means_no_limit(self):
+        self.assertEqual(self._run("--max-messages", "0"), 0)
+        self.assertEqual(len(self.sent), 40)
+
+
+# ==========================================================================
 # Credentials
 # ==========================================================================
 class TestSecrets(unittest.TestCase):
