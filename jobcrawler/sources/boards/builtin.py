@@ -102,5 +102,5 @@ def crawl_builtin(cfg, ctx):
                 ))
                 found += 1
         ctx.report.source("builtin", f'"{query}": {found} postings')
-    ctx.report.detail(f"{sum(1 for j in jobs if j['remote'])} of {len(jobs)} are remote")
+    ctx.report.detail(f"{sum(1 for j in jobs if j.remote)} of {len(jobs)} are remote")
     return jobs
