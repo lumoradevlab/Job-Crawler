@@ -121,6 +121,12 @@ examples:
                    metavar="N",
                    help="refuse to send more than N in one run, so a lost "
                         "state file cannot flood the chat (0 = no limit)")
+    p.add_argument("--newest", action="store_true",
+                   help="when there are more than --max-messages, send the "
+                        "newest N instead of refusing. The rest are marked "
+                        "seen, not lost — they stay in the archive. This is "
+                        "the flag for adding a source, where a large batch "
+                        "is a real backfill rather than a lost state file")
     p.add_argument("--dry-run", action="store_true",
                    help="crawl and print what would be sent, send nothing")
     p.add_argument("--check", action="store_true",
@@ -244,13 +250,26 @@ def main(argv=None):
         report.result("nothing new to send")
         return 0
 
-    if args.max_messages and len(fresh) > args.max_messages:
+    over = args.max_messages and len(fresh) > args.max_messages
+    if over and not args.newest:
         report.warn(f"! {len(fresh)} new postings exceeds --max-messages "
                     f"{args.max_messages} — sending none.")
         report.warn("  this usually means the state file was lost. Re-run "
-                    "with --max-messages 0 to send them all, or --dry-run "
-                    "to look first.")
+                    "with --newest to send the newest "
+                    f"{args.max_messages}, --max-messages 0 to send them "
+                    "all, or --dry-run to look first.")
         return 3
+
+    held = []
+    if over:
+        # select() has already sorted by date, newest first. Everything not
+        # sent still goes into the state below, so "held" means reported as
+        # seen without being messaged — it stays in the archive either way,
+        # and --replay can always rebuild it.
+        held = fresh[args.max_messages:]
+        fresh = fresh[:args.max_messages]
+        report.line(f"sending the newest {len(fresh)}; marking the other "
+                    f"{len(held)} as seen (they stay in the archive)")
 
     if args.dry_run:
         from .telegram import format_posting
