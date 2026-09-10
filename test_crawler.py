@@ -392,7 +392,7 @@ class TestRejection(unittest.TestCase):
 
     def test_each_rule_names_itself(self):
         cases = [
-            ("not-mobile", make_job(title="Backend Engineer"), make_args()),
+            ("off-role", make_job(title="Backend Engineer"), make_args()),
             ("must", make_job(), make_args(must=["kotlin"])),
             ("exclude", make_job(title="Android Engineering Manager"),
              make_args(exclude=["manager"])),
@@ -426,7 +426,7 @@ class TestRejection(unittest.TestCase):
         # stopped it, in gate order.
         job = make_job(title="Backend Engineer", remote=False,
                        location="Berlin, Germany", us=None)
-        self.assertEqual(self.rule(job), "not-mobile")
+        self.assertEqual(self.rule(job), "off-role")
 
     def test_keep_is_exactly_the_shadow_of_rejection(self):
         jobs = [make_job(), make_job(title="Backend Engineer"),
@@ -498,7 +498,7 @@ class TestReportRejections(unittest.TestCase):
         rows, out = self.report([], [("greenhouse", "Account Executive")])
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["source"], "greenhouse")
-        self.assertIn("not-mobile", rows[0]["reason"])
+        self.assertIn("off-role", rows[0]["reason"])
         self.assertIn("1 of them by a source's own title gate", out)
 
     def test_the_summary_groups_on_the_category_and_ranks_by_size(self):

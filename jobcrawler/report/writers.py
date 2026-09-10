@@ -28,7 +28,7 @@ def report_rejections(rejected, base, skipped=(), report=None):
     reason, read the "onsite" and "not-remote" rows, and the false-negative
     rate is right there instead of being sampled by hand.
     """
-    rows = [{"source": src, "reason": "not-mobile: dropped by the source's "
+    rows = [{"source": src, "reason": "off-role: dropped by the source's "
                                       "own title gate, before the main one",
              "title": title, "company": "", "location": "",
              "posted": "", "url": ""}

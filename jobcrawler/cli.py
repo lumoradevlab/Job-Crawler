@@ -14,6 +14,7 @@ from .pipeline.collect import collect
 from .pipeline.dedupe import SOURCE_RANK, dedupe_key
 from .pipeline.select import SALARY_FIELDS, select, split_new
 from .report.events import Reporter
+from .roles import DEFAULT_ROLE, combine, profile_names
 from .report.writers import report_rejections, write_outputs
 from .sources.ats.discover import discover_boards
 from .sources.linkedin import EXPERIENCE
@@ -42,7 +43,10 @@ def build(args, report, days, today, state, boards_found):
     downstream takes a CrawlConfig and a RunContext, which is what lets a
     source be called from a test with two small objects and no CLI at all.
     """
+    profile = combine(args.role)
     filters = FilterConfig(
+        subject=profile.pattern(),
+        role=profile.role_pattern(),
         no_filter=args.no_filter,
         must=tuple(args.must) if args.must else None,
         exclude=tuple(args.exclude) if args.exclude else None,
@@ -54,7 +58,7 @@ def build(args, report, days, today, state, boards_found):
         min_salary=args.min_salary,
     )
     cfg = CrawlConfig(
-        keywords=tuple(args.keywords),
+        keywords=tuple(args.keywords or profile.queries),
         sources=tuple(args.source),
         location=args.location,
         pages=args.pages,
@@ -156,7 +160,14 @@ def parser():
   python3 crawler.py --anywhere
 """,
     )
-    p.add_argument("-k", "--keywords", nargs="+", default=DEFAULT_QUERIES,
+    p.add_argument("--role", nargs="+", default=[DEFAULT_ROLE],
+                   choices=profile_names(), metavar="NAME",
+                   help="which discipline to crawl for (default %s). "
+                        "Several may be given: --role backend devops. "
+                        "Each swaps the title gate and the default queries "
+                        "together. Names: %s"
+                        % (DEFAULT_ROLE, ", ".join(profile_names())))
+    p.add_argument("-k", "--keywords", nargs="+", default=None,
                    metavar="QUERY",
                    help="search queries (default: %d mobile/Android variants)"
                         % len(DEFAULT_QUERIES))

@@ -3,18 +3,51 @@
 import re
 from datetime import datetime, timedelta
 
+from ..roles.profiles import NOT_TECHNICAL, ROLE_WORDS
 from .geo import us_status
 from .workplace import HYBRID_SPLIT, ONSITE, REMOTE_HINT
 
 
+# The Android gate, kept as the module default so a caller that never
+# mentions a role behaves exactly as it always has. A profile overrides it
+# per run via FilterConfig.subject — see jobcrawler/roles/.
 RELEVANT = re.compile(
     r"\b(android|kotlin|jetpack\s*compose|mobile|react\s*native|flutter|"
     r"ios\s*/?\s*android)\b", re.I
 )
-ROLE = re.compile(
-    r"\b(developer|engineer|engineering|programmer|swe|architect|"
-    r"development)\b", re.I
-)
+ROLE = re.compile(r"\b(" + ROLE_WORDS + r")\b", re.I)
+
+
+def _subject_pattern(filters):
+    """The discipline regex this run is gating on.
+
+    A run carries its profile as a compiled pattern on the filters; anything
+    without one — the test suite's argparse Namespaces, a caller predating
+    profiles — falls back to the Android gate that was here before.
+    """
+    return getattr(filters, "subject", None) or RELEVANT
+
+
+def _role_pattern(filters):
+    """The role-noun regex, which a profile may widen.
+
+    "Manager" and "designer" are role nouns the engineering profiles must
+    not accept — "Product Manager, Mobile" is not a mobile engineering job —
+    so product and design carry their own additions rather than the shared
+    list growing to fit them.
+    """
+    return getattr(filters, "role", None) or ROLE
+
+
+def _is_technical(title):
+    """False for the roles a discipline regex catches but nobody wants.
+
+    "Sales Engineer" matches every sensible definition of engineer, and
+    "Technical Recruiter" matches "technical". Both are jobs at a software
+    company rather than software jobs, and on the wider profiles they are
+    the single biggest source of noise.
+    """
+    return not NOT_TECHNICAL.search(title or "")
 
 # Most sources apply the title gate themselves, before paying for a detail
 # fetch — so a non-mobile title never reaches keep() and --why would report
@@ -28,7 +61,9 @@ def relevant(title, filters, source="?", report=None):
     pool, where one mutable field would attribute drops to whichever source
     happened to set it last.
     """
-    if filters.no_filter or (RELEVANT.search(title) and ROLE.search(title)):
+    if filters.no_filter or (_subject_pattern(filters).search(title)
+                             and _role_pattern(filters).search(title)
+                             and _is_technical(title)):
         return True
     if filters.why and report is not None:
         report.skipped(source, title)
@@ -53,9 +88,13 @@ def rejection(job, filters):
     # bury it in the body, so they set match_text to widen the gate.
     subject = job.ref.get("match_text") or title
 
-    if not filters.no_filter and not (RELEVANT.search(subject)
-                                   and ROLE.search(subject)):
-        return "not-mobile: no Android/mobile role in the title"
+    if not filters.no_filter:
+        pattern = _subject_pattern(filters)
+        if not (pattern.search(subject)
+                and _role_pattern(filters).search(subject)):
+            return "off-role: the title names no matching role"
+        if not _is_technical(title):
+            return "not-technical: a sales/recruiting/support title"
     if filters.must:
         hay = (title + " " + job.description).lower()
         absent = [w for w in filters.must if w.lower() not in hay]

@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 
 from ...filters.geo import us_status
-from ...filters.rules import RELEVANT
+from ...filters.rules import _subject_pattern
 from ...filters.workplace import REMOTE_HINT
 from ...models import row
 from ...parse.html import strip_tags
@@ -39,7 +39,7 @@ def crawl_hn(cfg, ctx):
         if not c or c.get("deleted") or c.get("dead") or not c.get("text"):
             return None
         body = strip_tags(c["text"])
-        if not RELEVANT.search(body):
+        if not _subject_pattern(cfg.filters).search(body):
             return None
         headline = body.split("\n")[0][:150]
         company = re.split(r"\s*[|–-]\s*", headline)[0][:60]

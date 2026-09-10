@@ -28,6 +28,7 @@ from ..net.ratelimit import HostPolicy, RateLimiter
 from ..pipeline.collect import collect
 from ..pipeline.select import select, split_new
 from ..report.events import Reporter
+from ..roles import DEFAULT_ROLE, combine, profile_names
 from ..sources.registry import SOURCES
 from ..store.archive import Archive
 from ..store.seen import (catchup_days, job_key, load_state, record_run,
@@ -60,11 +61,9 @@ BOT_SOURCES = [
     "adzuna", "linkedin", "builtin",
 ]
 
-DEFAULT_QUERIES = [
-    "Android Developer", "Android Engineer", "Mobile Developer",
-    "Mobile Engineer", "Android Software Engineer", "Kotlin Developer",
-    "Mobile Software Engineer", "Senior Android Developer",
-]
+# Kept as a name for anything importing it; the queries a run actually uses
+# come from its --role profile.
+DEFAULT_QUERIES = list(combine([DEFAULT_ROLE]).queries)
 
 # Sending 40 messages because someone deleted the state file is how a bot
 # gets muted. Past this many, the run says so and sends nothing rather than
@@ -89,9 +88,15 @@ examples:
   jobcrawler-bot --check          # verify the token and chat, then stop
   jobcrawler-bot                  # the real thing, as the schedule runs it
 """)
+    p.add_argument("--role", nargs="+", default=[DEFAULT_ROLE],
+                   choices=profile_names(), metavar="NAME",
+                   help="which discipline to send jobs for (default %s). "
+                        "Several may be given: --role backend devops. "
+                        "Names: %s"
+                        % (DEFAULT_ROLE, ", ".join(profile_names())))
     p.add_argument("-k", "--keywords", nargs="+", metavar="QUERY",
-                   default=DEFAULT_QUERIES,
-                   help="search queries (default: 8 mobile/Android variants)")
+                   default=None,
+                   help="override the role's default search queries")
     p.add_argument("--source", nargs="+", choices=sorted(SOURCES),
                    default=BOT_SOURCES, metavar="NAME",
                    help="default: every keyless API plus adzuna")
@@ -164,7 +169,10 @@ GitHub Actions store them under Settings -> Secrets and variables -> Actions.
 
 def build(args, report, days, today, state):
     """The two objects every source is handed. No argparse past this point."""
+    profile = combine(args.role)
     filters = FilterConfig(
+        subject=profile.pattern(),
+        role=profile.role_pattern(),
         exclude=tuple(args.exclude) if args.exclude else None,
         anywhere=args.anywhere,
         strict_us=args.strict_us,
@@ -172,7 +180,7 @@ def build(args, report, days, today, state):
         min_salary=args.min_salary,
     )
     cfg = CrawlConfig(
-        keywords=tuple(args.keywords),
+        keywords=tuple(args.keywords or profile.queries),
         sources=tuple(args.source),
         location="Worldwide" if args.anywhere else "United States",
         pages=args.pages,

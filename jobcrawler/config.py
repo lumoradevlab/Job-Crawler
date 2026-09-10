@@ -35,6 +35,12 @@ class FilterConfig:
     days: int = 0
     why: bool = False
     min_salary: Optional[int] = None
+    # The role profile's compiled gates. Left None the rules fall back to
+    # the Android pattern that predates profiles, so a caller that never
+    # mentions a role — including the test suite's argparse Namespaces —
+    # behaves exactly as it did.
+    subject: Optional[object] = None
+    role: Optional[object] = None
 
 
 @dataclass(frozen=True)

@@ -31,6 +31,7 @@ jobs:
           python test_net.py
           python test_pipeline.py
           python test_notify.py
+          python test_roles.py
 
       - name: The package imports and the CLI answers
         run: |
