@@ -97,7 +97,7 @@ class TestSelect(unittest.TestCase):
         _, loud = c.select([job(title="Account Executive")], c.FilterConfig(),
                            explain=True)
         self.assertEqual(len(loud), 1)
-        self.assertTrue(loud[0][1].startswith("not-mobile"))
+        self.assertTrue(loud[0][1].startswith("off-role"))
 
     def test_the_better_ranked_source_wins_a_duplicate(self):
         # An ATS link outlives the aggregator redirect that points at it.
