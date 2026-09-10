@@ -15,6 +15,10 @@ on:
         description: "Crawl and log what would be sent, without sending"
         type: boolean
         default: false
+      newest:
+        description: "Over the limit, send the newest 25 instead of refusing (for a backfill after adding a source)"
+        type: boolean
+        default: false
 
 # Two runs at once would crawl the same jobs and race on the state file,
 # which is how a posting gets sent twice. A late run waits for the one ahead.
@@ -65,6 +69,7 @@ jobs:
         run: |
           jobcrawler-bot \
             ${{ inputs.dry_run && '--dry-run' || '' }} \
+            ${{ inputs.newest && '--newest' || '' }} \
             --days 14 \
             --max-messages 25
 
