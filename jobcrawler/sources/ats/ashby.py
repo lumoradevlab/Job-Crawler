@@ -7,7 +7,7 @@ here offers.
 """
 
 from ...filters.geo import US_COUNTRY, us_status
-from ...filters.workplace import REMOTE_HINT
+from ...filters.workplace import ONSITE, REMOTE_HINT
 from ...models import row
 from ...parse.html import strip_tags
 from .driver import BoardSpec, make_source
@@ -45,6 +45,23 @@ def ashby_places(job):
     return " / ".join(dict.fromkeys(places)), countries
 
 
+def _is_remote(j, label):
+    """Whether an Ashby posting is genuinely remote.
+
+    The location text outranks the flag, in both directions: a label that
+    names an office is an office job however isRemote is set, and a label
+    that says remote is remote. Only when the label names no workplace at
+    all does isRemote get to decide.
+    """
+    if ONSITE.search(label) and not REMOTE_HINT.search(label):
+        return False
+    if REMOTE_HINT.search(label):
+        return True
+    # No workplace stated anywhere — including no location at all, which is
+    # where a genuinely remote posting most often ends up.
+    return bool(j.get("isRemote")) and not label.strip()
+
+
 def _posting(j, token, data):
     label, countries = ashby_places(j)
     if countries:
@@ -54,9 +71,17 @@ def _posting(j, token, data):
     return row(
         "ashby", j.get("title", ""), token.title(), label or "Unspecified",
         j.get("jobUrl", ""), (j.get("publishedAt") or "")[:10],
-        # workplaceType can read "Hybrid" while a "Remote (US)" alternate
-        # location exists, so isRemote is the flag to trust.
-        remote=bool(j.get("isRemote")) or bool(REMOTE_HINT.search(label)),
+        # NOT isRemote alone. Measured across 2,253 live postings from 14
+        # Ashby boards: 1,693 carry isRemote=true, and 1,401 of those name
+        # only a city with no remote wording anywhere — "Data Center Design
+        # Engineer, San Francisco" among them. It is not one company's bad
+        # data either; Notion, Linear, Strava and Sentry all sit at 100%.
+        #
+        # So the location is what decides, and isRemote is demoted to what
+        # it can still be trusted for: breaking the tie when a posting names
+        # no place at all. A flag that is true three times in four carries
+        # almost no information on its own.
+        remote=_is_remote(j, label),
         us=status, description=strip_tags(j.get("descriptionHtml", "")),
         apply_url=j.get("applyUrl", ""),
     )
