@@ -127,6 +127,11 @@ examples:
                    metavar="N",
                    help="refuse to send more than N in one run, so a lost "
                         "state file cannot flood the chat (0 = no limit)")
+    p.add_argument("--no-digest", action="store_true",
+                   help="over --max-messages, refuse to send rather than "
+                        "summarising the overflow. The old behaviour, kept "
+                        "for the case the cap was written for: a lost state "
+                        "file, where stopping is the right answer")
     p.add_argument("--newest", action="store_true",
                    help="when there are more than --max-messages, send the "
                         "newest N instead of refusing. The rest are marked "
@@ -288,40 +293,59 @@ def main(argv=None):
         return 0
 
     over = args.max_messages and len(fresh) > args.max_messages
-    if over and not args.newest:
+
+    # --no-digest restores the old behaviour: refuse outright. Kept because
+    # a genuinely lost state file is still worth stopping for, and only the
+    # reader knows which of the two they are looking at.
+    if over and args.no_digest and not args.newest:
         report.warn(f"! {len(fresh)} new postings exceeds --max-messages "
                     f"{args.max_messages} — sending none.")
-        report.warn("  this usually means the state file was lost. Re-run "
-                    "with --newest to send the newest "
-                    f"{args.max_messages}, --max-messages 0 to send them "
-                    "all, or --dry-run to look first.")
+        report.warn("  drop --no-digest to send the newest "
+                    f"{args.max_messages} plus a summary of the rest, or "
+                    "--max-messages 0 to send them all individually.")
         return 3
 
-    held = []
+    digest = []
     if over:
-        # select() has already sorted by date, newest first. Everything not
-        # sent still goes into the state below, so "held" means reported as
-        # seen without being messaged — it stays in the archive either way,
-        # and --replay can always rebuild it.
-        held = fresh[args.max_messages:]
+        # select() has already sorted by date, newest first. The tail is
+        # summarised rather than dropped: with fourteen sources a busy day
+        # legitimately turns up forty jobs, and losing thirty of them
+        # silently is worse than the flood the cap was guarding against.
+        digest = fresh[args.max_messages:]
         fresh = fresh[:args.max_messages]
-        report.line(f"sending the newest {len(fresh)}; marking the other "
-                    f"{len(held)} as seen (they stay in the archive)")
+        report.line(f"sending the newest {len(fresh)} individually, "
+                    f"{len(digest)} more in a summary")
 
     if args.dry_run:
         from .telegram import format_posting
         for j in fresh:
             report.result("-" * 60)
             report.result(format_posting(j))
+        if digest:
+            from .telegram import format_digest
+            report.result("-" * 60)
+            report.result(format_digest(digest, len(fresh)))
         report.result("-" * 60)
-        report.result(f"{len(fresh)} message(s) would be sent. "
-                      f"Nothing was sent and no state was written.")
+        report.result(f"{len(fresh)} message(s) would be sent"
+                      + (f", plus a summary of {len(digest)}" if digest else "")
+                      + ". Nothing was sent and no state was written.")
         return 0
 
     ids = notifier.send_postings(fresh, buttons=not args.no_buttons,
                                  key_of=job_key)
     sent = len(ids)
-    report.result(f"sent {sent} of {len(fresh)} to telegram")
+    if digest:
+        from .telegram import format_digest
+        try:
+            notifier.send(format_digest(digest, sent))
+            report.result(f"sent {sent} individually, {len(digest)} in a summary")
+        except TelegramError as e:
+            # The summary failing must not cost the state write: the
+            # individual messages already arrived, and re-sending those
+            # tomorrow would be worse than losing one summary.
+            report.warn(f"  ! telegram: summary failed: {e}")
+    else:
+        report.result(f"sent {sent} of {len(fresh)} to telegram")
 
     # Only now. A job is "reported" when Telegram has it, not when we decided
     # to send it — see the module docstring.

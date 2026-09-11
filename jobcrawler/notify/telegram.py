@@ -279,6 +279,37 @@ class TelegramNotifier:
             return False
 
 
+def format_digest(jobs, shown):
+    """The overflow: everything past the individual messages, in one message.
+
+    The flood guard was written when a run turned up a handful of Android
+    jobs and forty meant the state file had been lost. With fourteen sources
+    and seventeen role profiles, forty is an ordinary Tuesday — so refusing
+    to send became a failure on healthy runs, and sending only the newest
+    quietly dropped the rest.
+
+    A digest keeps both properties: the newest are worth a message each,
+    with buttons; the tail is worth a line each, with a link. Nothing is
+    lost and nothing floods.
+    """
+    lines = [f"<b>+{len(jobs)} more</b> — newest {shown} sent above", ""]
+    for job in jobs:
+        title = _esc(job.title or "Untitled role")[:70]
+        link = f'<a href="{_esc(job.url)}">{title}</a>' if job.url else title
+        where = job.company or job.location or ""
+        lines.append("· " + link + (f" — {_esc(where)}" if where else ""))
+
+    text = "\n".join(lines)
+    if len(text) <= MAX_MESSAGE:
+        return text
+    # A very wide run can overflow one message too. Trim by line rather than
+    # by character, so the last entry is whole instead of cut mid-link.
+    while len(text) > MAX_MESSAGE - 40 and len(lines) > 3:
+        lines.pop()
+        text = "\n".join(lines)
+    return text + "\n\n<i>…list truncated</i>"
+
+
 class _Throttled(Exception):
     """A 429 carrying the API's own retry_after."""
 
