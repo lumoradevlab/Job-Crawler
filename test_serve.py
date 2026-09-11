@@ -18,7 +18,7 @@ import unittest
 
 import jobcrawler as c
 from jobcrawler.filters.countries import CA, US
-from jobcrawler.notify import fanout, router
+from jobcrawler.notify import actions, fanout, router, usertaps
 from jobcrawler.notify.subscribers import (SEEN_TTL_DAYS, Subscriber,
                                            Subscribers, seen_key)
 from jobcrawler.notify.telegram import Blocked
@@ -33,6 +33,9 @@ class StubBot:
         self.edits = []
         self.toasts = []
         self.last_message_id = {}
+        self.confirmed = []
+        self.restored = []
+        self.marked = []
         self.blocked = set(str(b) for b in blocked)
 
     def send_to(self, chat_id, text, preview=False, markup=None):
@@ -55,6 +58,21 @@ class StubBot:
 
     def answer_raw(self, callback_id, text):
         self.toasts.append(text)
+
+    def answer(self, callback_id, action):
+        self.toasts.append(action)
+
+    def ask_confirm_in(self, chat_id, message_id, url=None):
+        self.confirmed.append((str(chat_id), message_id))
+        return True
+
+    def restore_buttons_in(self, chat_id, message_id, url=None):
+        self.restored.append((str(chat_id), message_id))
+        return True
+
+    def mark_in(self, chat_id, message_id, text, action):
+        self.marked.append((str(chat_id), message_id, action))
+        return True
 
     def texts_to(self, chat_id):
         return [t for cid, t, _ in self.sent if cid == str(chat_id)]
@@ -310,6 +328,139 @@ class TestFanout(unittest.TestCase):
         fanout.deliver(self.bot, self.subs, sub, many, US, "2026-09-12",
                        5, c.NullReporter())
         self.assertEqual(len(sub.seen), 20)
+
+
+# ==========================================================================
+# A tap belongs to the person who made it
+# ==========================================================================
+class TestPerUserTaps(unittest.TestCase):
+    """The same button means different things to different readers.
+
+    One reader muting Acme must not silence it for anyone else, and one
+    reader's /applied must not list another's jobs. That is the whole
+    reason a tap resolves to a subscriber before it resolves to a posting.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.subs = Subscribers(os.path.join(self.dir, "s.json"))
+        self.bot = StubBot()
+        self.job = job("Backend Engineer", "Acme", url="https://x.example/1")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _subscribed(self, chat_id="1"):
+        sub = self.subs.add(chat_id, roles=["backend"])
+        key = sub.record_sent(self.job, 500, "2026-09-12")
+        return sub, key
+
+    def _tap(self, action, key, chat_id="1", message_id=500):
+        return {"id": "cb", "data": actions.encode(action, self.job.url),
+                "message": {"message_id": message_id,
+                            "chat": {"id": int(chat_id)},
+                            "text": "Backend Engineer"}}
+
+    def test_a_button_resolves_to_the_posting_it_was_sent_with(self):
+        # The digest a button carries and the key a posting is stored under
+        # have to be the same function, or a tap is unresolvable.
+        sub, key = self._subscribed()
+        self.assertEqual(actions.tap_id(self.job.url), key)
+        self.assertIn(key, sub.sent)
+
+    def test_applying_records_it_against_that_subscriber(self):
+        sub, key = self._subscribed()
+        usertaps.handle_tap(self.bot, sub, self._tap("applied", key), "2026-09-13")
+        self.assertIn(self.job.url, sub.applied)
+        self.assertEqual(sub.applied[self.job.url]["when"], "2026-09-13")
+        self.assertEqual(sub.sent[key]["state"], "applied")
+
+    def test_one_readers_tap_leaves_another_alone(self):
+        a, key = self._subscribed("1")
+        b, _ = self._subscribed("2")
+        usertaps.handle_tap(self.bot, a, self._tap("applied", key), "2026-09-13")
+        self.assertEqual(b.applied, {})
+        self.assertEqual(b.sent[key]["state"], "sent")
+
+    def test_muting_silences_the_company_for_that_reader_only(self):
+        a, key = self._subscribed("1")
+        b, _ = self._subscribed("2")
+        usertaps.handle_tap(self.bot, a, self._tap("muted", key), "2026-09-13")
+        self.assertFalse(a.wants("Acme"))
+        self.assertTrue(b.wants("Acme"))
+
+    def test_the_message_is_rewritten_in_that_readers_chat(self):
+        sub, key = self._subscribed("7")
+        usertaps.handle_tap(self.bot, sub, self._tap("applied", key, "7"),
+                            "2026-09-13")
+        self.assertEqual(self.bot.marked, [("7", 500, "applied")])
+
+    def test_opening_asks_rather_than_recording(self):
+        sub, key = self._subscribed()
+        usertaps.handle_tap(self.bot, sub, self._tap("opening", key), "2026-09-13")
+        self.assertEqual(sub.sent[key]["state"], "sent")
+        self.assertEqual(sub.applied, {})
+        self.assertEqual(self.bot.confirmed, [("1", 500)])
+
+    def test_declining_restores_the_buttons_and_records_nothing(self):
+        sub, key = self._subscribed()
+        usertaps.handle_tap(self.bot, sub, self._tap("opening", key), "2026-09-13")
+        usertaps.handle_tap(self.bot, sub, self._tap("cancel", key), "2026-09-13")
+        self.assertNotIn("asked_at", sub.sent[key])
+        self.assertEqual(self.bot.restored, [("1", 500)])
+
+    def test_applying_removes_it_from_saved(self):
+        # A job you applied to is no longer one you are meaning to look at.
+        sub, key = self._subscribed()
+        usertaps.handle_tap(self.bot, sub, self._tap("saved", key), "2026-09-13")
+        usertaps.handle_tap(self.bot, sub, self._tap("applied", key), "2026-09-14")
+        self.assertIn(self.job.url, sub.applied)
+        self.assertNotIn(self.job.url, sub.saved)
+
+    def test_the_same_tap_twice_changes_nothing(self):
+        sub, key = self._subscribed()
+        for _ in range(3):
+            usertaps.handle_tap(self.bot, sub,
+                                self._tap("muted", key), "2026-09-13")
+        self.assertEqual(len(sub.muted), 1)
+
+    def test_a_tap_on_a_pruned_posting_is_survivable(self):
+        sub = self.subs.add("1", roles=["backend"])
+        self.assertTrue(usertaps.handle_tap(
+            self.bot, sub, self._tap("applied", "deadbeef00"), "2026-09-13"))
+        self.assertEqual(sub.applied, {})
+
+    def test_the_reader_is_answered_even_then(self):
+        sub = self.subs.add("1", roles=["backend"])
+        usertaps.handle_tap(self.bot, sub,
+                            self._tap("applied", "deadbeef00"), "2026-09-13")
+        self.assertEqual(self.bot.toasts, ["applied"])
+
+    def test_delivering_stores_what_a_tap_will_need(self):
+        # Without the message_id there is no message to rewrite; without the
+        # company there is nothing to mute.
+        sub = self.subs.add("1", roles=["backend"])
+        fanout.deliver(self.bot, self.subs, sub, [self.job], US,
+                       "2026-09-12", 15, c.NullReporter())
+        record = sub.sent[actions.tap_id(self.job.url)]
+        self.assertEqual(record["company"], "Acme")
+        self.assertIsNotNone(record["message_id"])
+
+    def test_pruning_keeps_what_the_reader_acted_on(self):
+        # /applied is a record, not a feed: an application from last year is
+        # still an application.
+        sub, key = self._subscribed()
+        usertaps.handle_tap(self.bot, sub, self._tap("applied", key), "2026-01-01")
+        sub.seen[key] = "2026-01-01"
+        sub.prune("2026-09-13")
+        self.assertIn(key, sub.sent)
+        self.assertIn(self.job.url, sub.applied)
+
+    def test_pruning_drops_what_they_ignored(self):
+        sub, key = self._subscribed()
+        sub.seen[key] = "2026-01-01"
+        sub.prune("2026-09-13")
+        self.assertNotIn(key, sub.sent)
 
 
 if __name__ == "__main__":
