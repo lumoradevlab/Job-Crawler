@@ -1,0 +1,68 @@
+name: Bug report
+description: Something the crawler or the bot gets wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things make a crawler bug reproducible, and they are the two
+        easiest to leave out: the exact command, and what the run printed.
+        `--why` names the rule that dropped a posting, which is usually the
+        whole answer for "why isn't this job in my results".
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The command you ran
+      description: The full line, flags included.
+      render: shell
+      placeholder: python3 crawler.py --role backend --country ca --why
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      placeholder: |
+        Expected: this Shopify posting in the results.
+        Got: nothing from Shopify at all.
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: What the run printed
+      description: >
+        The per-source lines and the summary. If a posting was dropped, run
+        again with `--why` and paste the rule that named it.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: posting
+    attributes:
+      label: A posting that shows the problem
+      description: A link, if the bug is about one job in particular.
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Python version and OS
+      placeholder: "3.12 on macOS 15"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: The test suite passes on my checkout (`python3 test_crawler.py`)
+          required: false
+        - label: I have redacted any API keys from the output above
+          required: true
