@@ -19,6 +19,7 @@ from ..filters.countries import COUNTRIES, country_codes
 from ..report.events import Reporter
 from .fanout import crawl_country, deliver, for_subscriber
 from .router import chat_of, handle_command, handle_setup, is_block
+from .usertaps import handle_tap
 from .secrets import load_env_file, redact
 from .subscribers import Subscribers
 from .telegram import Blocked, TelegramError, TelegramNotifier
@@ -57,8 +58,9 @@ def parser():
     return p
 
 
-def read_updates(bot, subs, report):
+def read_updates(bot, subs, report, today=None):
     """Answer everything people have typed or tapped since the last run."""
+    today = today or datetime.now().strftime("%Y-%m-%d")
     try:
         batch = bot.updates(offset=None)
     except TelegramError as e:
@@ -82,8 +84,15 @@ def read_updates(bot, subs, report):
             data = query.get("data") or ""
             bot.last_message_id[chat_id] = (
                 (query.get("message") or {}).get("message_id"))
+            # Setup taps first: they are the only ones a chat with no
+            # subscriber row can legitimately send, since choosing a role is
+            # what creates one.
             if handle_setup(bot, subs, chat_id, data, query.get("id")):
                 bot.answer_raw(query.get("id"), "Saved")
+                handled += 1
+                continue
+            sub = subs.get(chat_id)
+            if sub and handle_tap(bot, sub, query, today):
                 handled += 1
             continue
 

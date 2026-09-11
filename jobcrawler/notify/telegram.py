@@ -341,6 +341,35 @@ class TelegramNotifier:
         except TelegramError:
             return False
 
+    # -- the same three edits, addressed to a chat ------------------------
+    # The bound-chat versions above stay for the single-reader bot. These
+    # take the chat explicitly, because a fan-out edits messages in many.
+    def ask_confirm_in(self, chat_id, message_id, url=None):
+        """Turn one subscriber's message into the "did you apply?" prompt."""
+        return self.edit_markup(chat_id, message_id,
+                                confirm_keyboard(url or ""))
+
+    def restore_buttons_in(self, chat_id, message_id, url=None):
+        """Put the resting buttons back in one subscriber's chat."""
+        return self.edit_markup(chat_id, message_id, keyboard(url or "", url))
+
+    def mark_in(self, chat_id, message_id, text, action):
+        """Rewrite one subscriber's message and drop its buttons."""
+        mark = MARKS.get(action)
+        body = f"{text}\n\n<b>{mark}</b>" if mark else text
+        try:
+            self._call("editMessageText", {
+                "chat_id": str(chat_id), "message_id": message_id,
+                "text": body[:MAX_MESSAGE], "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            })
+            return True
+        except TelegramError:
+            # "message is not modified" and "message to edit not found" are
+            # both ordinary: a message the reader deleted, or a tap an
+            # earlier run already applied.
+            return False
+
     def mark(self, message_id, text, action):
         """Rewrite a tapped message to show what was done, and drop its buttons.
 

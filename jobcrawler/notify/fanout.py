@@ -96,9 +96,16 @@ def deliver(bot, subs, sub, jobs, country, today, limit, report):
         report.line(f"  {sub.chat_id} blocked the bot — unsubscribed")
         return 0
 
-    # Marked seen only after Telegram accepted them: a send that failed
-    # must come back tomorrow rather than being silently dropped.
-    for j in fresh + overflow:
+    # Recorded only after Telegram accepted them: a send that failed must
+    # come back tomorrow rather than being silently dropped.
+    #
+    # The individually-sent ones get a full record, because a tap on one has
+    # to find its title, its company and the message to rewrite. The summary
+    # entries carry no buttons and so need only the dated seen key.
+    for j in fresh:
+        key = j.url or job_key(j)
+        sub.record_sent(j, ids.get(key), today)
+    for j in overflow:
         sub.mark_seen(j.url or job_key(j), today)
     sub.prune(today)
     return len(ids)

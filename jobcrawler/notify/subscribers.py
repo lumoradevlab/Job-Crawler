@@ -23,12 +23,12 @@ lives on someone else's infrastructure it is that person's responsibility,
 and the cheapest way to hold it responsibly is to hold almost none of it.
 """
 
-import hashlib
 import json
 from datetime import datetime, timedelta
 
 from ..filters.countries import DEFAULT_COUNTRY
 from ..roles import DEFAULT_ROLE
+from .actions import tap_id
 
 # Keys older than this are dropped from a subscriber's seen list. It has to
 # exceed the widest --days any run uses, or a pruned posting comes back as
@@ -36,16 +36,20 @@ from ..roles import DEFAULT_ROLE
 SEEN_TTL_DAYS = 120
 
 
+# The same digest the buttons carry. It has to be: a tap arrives as
+# "applied:<digest>" and nothing else, so the only way back to the posting
+# is to have stored it under that key. Two digest schemes for one URL — one
+# for the seen list, another for the buttons — would make a tap unresolvable.
 def seen_key(url):
-    """A short stable handle for a posting, so seen lists stay small."""
-    return hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:12]
+    """A short stable handle for a posting, shared with actions.tap_id."""
+    return tap_id(url or "")
 
 
 class Subscriber:
     """One reader, and everything the bot knows about them."""
 
     __slots__ = ("chat_id", "roles", "country", "joined", "paused",
-                 "seen", "muted", "applied", "saved")
+                 "seen", "muted", "applied", "saved", "sent")
 
     # A sentinel, because an empty roles list is a real state — it is what
     # someone has mid-signup, having untoggled everything — and `or` would
@@ -54,7 +58,7 @@ class Subscriber:
 
     def __init__(self, chat_id, roles=_UNSET, country=DEFAULT_COUNTRY,
                  joined=None, paused=False, seen=None, muted=None,
-                 applied=None, saved=None):
+                 applied=None, saved=None, sent=None):
         self.chat_id = str(chat_id)
         self.roles = ([DEFAULT_ROLE] if roles is Subscriber._UNSET
                       else list(roles or []))
@@ -63,6 +67,13 @@ class Subscriber:
         self.paused = bool(paused)
         # {key: "YYYY-MM-DD"} — dated so it can be pruned.
         self.seen = dict(seen or {})
+        # {key: {title, company, url, message_id, state, ...}} for postings
+        # this reader was actually sent. A tap carries a digest and nothing
+        # else, so without this there is no way back to the job it names —
+        # not the title to show in /applied, nor the company to mute, nor
+        # the message to rewrite. Only sent postings are here; `seen` stays
+        # the cheap dated index and this holds the few that need acting on.
+        self.sent = dict(sent or {})
         self.muted = list(muted or [])
         self.applied = dict(applied or {})
         self.saved = dict(saved or {})
@@ -86,6 +97,15 @@ class Subscriber:
     def mark_seen(self, url, today):
         self.seen[seen_key(url)] = today
 
+    def record_sent(self, job, message_id, today):
+        """Remember enough about a sent posting to act on a tap about it."""
+        key = seen_key(job.url)
+        self.seen[key] = today
+        self.sent[key] = {"title": job.title, "company": job.company,
+                          "url": job.url, "message_id": message_id,
+                          "state": "sent", "sent_at": today}
+        return key
+
     def prune(self, today=None):
         """Drop seen keys older than the window any run could still ask for.
 
@@ -102,13 +122,18 @@ class Subscriber:
         stale = [k for k, d in self.seen.items() if d < cutoff]
         for k in stale:
             del self.seen[k]
+            # A posting nobody acted on is not worth keeping once it can no
+            # longer be re-sent. One they applied to or saved is, so those
+            # stay however old they get — /applied is a record, not a feed.
+            if self.sent.get(k, {}).get("state") in (None, "sent", "rejected"):
+                self.sent.pop(k, None)
         return len(stale)
 
     # -- serialisation ------------------------------------------------------
     def as_record(self):
         return {"roles": self.roles, "country": self.country,
                 "joined": self.joined, "paused": self.paused,
-                "seen": self.seen, "muted": self.muted,
+                "seen": self.seen, "sent": self.sent, "muted": self.muted,
                 "applied": self.applied, "saved": self.saved}
 
     @classmethod
@@ -116,8 +141,9 @@ class Subscriber:
         d = data or {}
         return cls(chat_id, roles=d.get("roles"), country=d.get("country"),
                    joined=d.get("joined"), paused=d.get("paused"),
-                   seen=d.get("seen"), muted=d.get("muted"),
-                   applied=d.get("applied"), saved=d.get("saved"))
+                   seen=d.get("seen"), sent=d.get("sent"),
+                   muted=d.get("muted"), applied=d.get("applied"),
+                   saved=d.get("saved"))
 
 
 class Subscribers:
