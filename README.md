@@ -152,16 +152,37 @@ jobcrawler-bot --dry-run      # crawl and print, send nothing
 jobcrawler-bot                # the real thing
 ```
 
-Every job arrives as its own message with four buttons:
+Every job arrives as its own message with buttons under it:
+
+```
+🚀 Apply        ✅ Applied?
+🔖 Save   🚫 Not for me   🔕 Mute company
+```
+
+**🚀 Apply** opens the posting — the employer's own application page where
+the source states one. The message then becomes a yes/no:
+
+```
+✅ I applied      ← Didn't apply
+```
 
 | button | what it does |
 |---|---|
-| ✅ **Applied** | marks and dates it; listed by `/applied` |
+| 🚀 **Apply** | opens the posting in your browser |
+| ✅ **I applied** | marks and dates it; listed by `/applied` |
+| ← **Didn't apply** | puts the original buttons back, records nothing |
 | 🔖 **Save** | listed by `/saved` |
 | 🚫 **Not for me** | this posting is never sent again |
 | 🔕 **Mute company** | nothing from them again, this posting included |
 
 Plus `/applied`, `/saved`, `/muted` and `/help` as typed commands.
+
+Apply is two buttons because it has to be. Telegram sends no callback for a
+url button — it is a link, not an action — and the employer's site cannot
+report back either, so the tap that opens the page and the tap that says you
+went are necessarily separate. Treating *opening* as *applying* would be one
+tap fewer and would fill `/applied` with jobs you merely looked at, which is
+the one thing an application tracker must not do.
 
 **Rejecting is not muting.** A badly-titled role is not a bad employer, and
 collapsing the two would cost you every future opening there on one tap.
@@ -471,7 +492,7 @@ python3 test_crawler.py -v         # naming each case
 python3 test_crawler.py TestKeep   # one class
 ```
 
-306 cases, none of which touch the network — the whole suite runs in well
+323 cases, none of which touch the network — the whole suite runs in well
 under a second, and CI never depends on a job board being up. The bot suites
 stub the notifier, so they never reach api.telegram.org either.
 
@@ -501,6 +522,12 @@ check them against real results:
   is already the only signal there and nothing is lost by leaving this loose.
 - **A split week is hybrid however cheerfully worded.** `4 days remote` reads
   as generous and still means an office one day a week.
+- **A board's own remote flag is not evidence.** Ashby's `isRemote` is true on
+  1,693 of 2,253 live postings and 1,401 of those name only a city — `Data
+  Center Design Engineer, San Francisco` among them. Notion, Linear, Strava
+  and Sentry all sit at 100%, so it is not one company's data entry. The
+  location text decides; the flag only settles a posting that names no place
+  at all.
 
 ## How it grades a posting
 
@@ -646,12 +673,19 @@ jobcrawler/
   net/              HTTP: retry, per-host pacing, failure accounting
   parse/            markup, salary prose, relative dates
   filters/          the gate: relevance, workplace, region
+    countries.py    what "home" means, per country
+  roles/            the seventeen role profiles and their gates
   sources/          one module per board
     ats/            company ATS boards, one driver + five specs
   pipeline/         collect -> select -> split new from seen
   store/            what a run remembers between runs
   report/           the reporter, and the files a run writes
+  notify/           the Telegram bot: messages, buttons, taps
 ```
+
+Issue and PR templates live in `.github/`. The bug form asks for the exact
+command and what the run printed, because those are the two things that make
+a crawler bug reproducible and the two easiest to leave out.
 
 **Adding a source.** Write `crawl_x(cfg, ctx)` returning a list of `Posting`,
 and register it in `sources/registry.py` with a rank in `pipeline/dedupe.py`.
