@@ -28,6 +28,8 @@ from ..net.ratelimit import HostPolicy, RateLimiter
 from ..pipeline.collect import collect
 from ..pipeline.select import select, split_new
 from ..report.events import Reporter
+from ..filters.countries import (DEFAULT_COUNTRY, country_codes,
+                                 resolve as resolve_country)
 from ..roles import DEFAULT_ROLE, combine, profile_names
 from ..sources.registry import SOURCES
 from ..store.archive import Archive
@@ -89,6 +91,11 @@ examples:
   jobcrawler-bot --check          # verify the token and chat, then stop
   jobcrawler-bot                  # the real thing, as the schedule runs it
 """)
+    p.add_argument("--country", default=DEFAULT_COUNTRY,
+                   choices=country_codes(),
+                   help="which country to look for work in (default %s). "
+                        "Sets the region gate and the national index a "
+                        "keyed source queries" % DEFAULT_COUNTRY)
     p.add_argument("--role", nargs="+", default=[DEFAULT_ROLE],
                    choices=profile_names(), metavar="NAME",
                    help="which discipline to send jobs for (default %s). "
@@ -179,9 +186,11 @@ GitHub Actions store them under Settings -> Secrets and variables -> Actions.
 def build(args, report, days, today, state):
     """The two objects every source is handed. No argparse past this point."""
     profile = combine(args.role)
+    country = resolve_country(args.country)
     filters = FilterConfig(
         subject=profile.pattern(),
         role=profile.role_pattern(),
+        country=country,
         exclude=tuple(args.exclude) if args.exclude else None,
         anywhere=args.anywhere,
         strict_us=args.strict_us,
@@ -190,8 +199,9 @@ def build(args, report, days, today, state):
     )
     cfg = CrawlConfig(
         keywords=tuple(args.keywords or profile.queries),
+        country=country,
         sources=tuple(args.source),
-        location="Worldwide" if args.anywhere else "United States",
+        location="Worldwide" if args.anywhere else country.linkedin,
         pages=args.pages,
         days=days,
         delay=args.delay,

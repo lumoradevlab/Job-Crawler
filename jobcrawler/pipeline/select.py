@@ -6,7 +6,7 @@ keep, and what the run should be able to explain afterwards. Pulled out, each
 one is a function over a list, which is the only thing needed to test it.
 """
 
-from ..filters.geo import us_status
+from ..filters.geo import home_status
 from ..filters.rules import rejection
 from ..store.seen import job_key
 from .dedupe import SOURCE_RANK, dedupe_key
@@ -45,7 +45,8 @@ def select(postings, filters, explain=False):
                 rejected.append((j, why))
             continue
 
-        j.us = j.us or us_status(j.location)
+        j.us = j.us or home_status(j.location,
+                                   getattr(filters, "country", None))
         key = dedupe_key(j)
         prior = best.get(key)
 

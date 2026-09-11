@@ -14,6 +14,8 @@ from .pipeline.collect import collect
 from .pipeline.dedupe import SOURCE_RANK, dedupe_key
 from .pipeline.select import SALARY_FIELDS, select, split_new
 from .report.events import Reporter
+from .filters.countries import (DEFAULT_COUNTRY, country_codes,
+                                 resolve as resolve_country)
 from .roles import DEFAULT_ROLE, combine, profile_names
 from .report.writers import report_rejections, write_outputs
 from .sources.ats.discover import discover_boards
@@ -44,9 +46,11 @@ def build(args, report, days, today, state, boards_found):
     source be called from a test with two small objects and no CLI at all.
     """
     profile = combine(args.role)
+    country = resolve_country(args.country)
     filters = FilterConfig(
         subject=profile.pattern(),
         role=profile.role_pattern(),
+        country=country,
         no_filter=args.no_filter,
         must=tuple(args.must) if args.must else None,
         exclude=tuple(args.exclude) if args.exclude else None,
@@ -59,6 +63,7 @@ def build(args, report, days, today, state, boards_found):
     )
     cfg = CrawlConfig(
         keywords=tuple(args.keywords or profile.queries),
+        country=country,
         sources=tuple(args.source),
         location=args.location,
         pages=args.pages,
@@ -160,6 +165,11 @@ def parser():
   python3 crawler.py --anywhere
 """,
     )
+    p.add_argument("--country", default=DEFAULT_COUNTRY,
+                   choices=country_codes(),
+                   help="which country to look for work in (default %s). "
+                        "Sets the region gate and the national index a "
+                        "keyed source queries" % DEFAULT_COUNTRY)
     p.add_argument("--role", nargs="+", default=[DEFAULT_ROLE],
                    choices=profile_names(), metavar="NAME",
                    help="which discipline to crawl for (default %s). "
@@ -257,6 +267,10 @@ def main():
     # --anywhere with the default location would still pin LinkedIn to the US.
     if args.anywhere and args.location == "United States":
         args.location = "Worldwide"
+    # ...and --country ca with the default would pin it to the US too, which
+    # is the same bug wearing a different flag.
+    elif args.location == "United States":
+        args.location = resolve_country(args.country).linkedin
 
     # Load the history before crawling, so the sources can narrow their own
     # work: a shorter date window, and no detail fetches for known jobs.
