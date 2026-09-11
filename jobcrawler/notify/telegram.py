@@ -37,6 +37,16 @@ class TelegramError(Exception):
     """A send that failed for a reason retrying will not fix."""
 
 
+class Blocked(TelegramError):
+    """The reader has blocked the bot, or deleted the chat.
+
+    Separate from TelegramError because it is not a failure to retry but a
+    fact to act on: Telegram returns 403 for that chat forever, so a bot
+    that treats it as a transient error spends one request per run per
+    departed reader for as long as it runs. The caller unsubscribes them.
+    """
+
+
 def _esc(text):
     """Escape for parse_mode=HTML — the only three characters it reserves.
 
@@ -116,6 +126,10 @@ class TelegramNotifier:
         self.report = report
         self.gap = gap
         self._last_send = 0.0
+        # The message most recently sent to each chat, so a keyboard can be
+        # redrawn in place — a role picker that toggles has to edit the
+        # message the tap came from, not send a new one each time.
+        self.last_message_id = {}
 
     # -- transport ---------------------------------------------------------
     def _call(self, method, payload):
@@ -142,6 +156,8 @@ class TelegramNotifier:
                     wait = (detail.get("parameters") or {}).get("retry_after", 5)
                 raise _Throttled(wait)
             what = detail.get("description") if isinstance(detail, dict) else e.reason
+            if e.code == 403:
+                raise Blocked(f"{method}: {what}")
             raise TelegramError(f"{method} failed: HTTP {e.code} — {what}")
         except urllib.error.URLError as e:
             raise TelegramError(f"{method} failed: {e.reason}")
@@ -166,10 +182,45 @@ class TelegramNotifier:
         me = self._call("getMe", {}) or {}
         return me.get("username") or "?"
 
-    def send(self, text, preview=False, markup=None):
+    def send_to(self, chat_id, text, preview=False, markup=None):
+        """Send to one chat by id, rather than to the bound one.
+
+        The bound chat_id stays the default for a single-reader run; this is
+        what a fan-out uses, and what answers a stranger who has just typed
+        /start.
+        """
+        result = self.send(text, preview=preview, markup=markup,
+                           chat_id=chat_id)
+        if isinstance(result, dict) and result.get("message_id"):
+            self.last_message_id[str(chat_id)] = result["message_id"]
+        return result
+
+    def edit_markup(self, chat_id, message_id, markup):
+        """Redraw one message's keyboard, leaving its text alone."""
+        if not message_id:
+            return False
+        try:
+            self._call("editMessageReplyMarkup",
+                       {"chat_id": str(chat_id), "message_id": message_id,
+                        "reply_markup": markup})
+            return True
+        except TelegramError:
+            return False
+
+    def answer_raw(self, callback_id, text):
+        """A toast with arbitrary text, for the setup buttons."""
+        if not callback_id:
+            return
+        try:
+            self._call("answerCallbackQuery",
+                       {"callback_query_id": callback_id, "text": text})
+        except TelegramError:
+            pass
+
+    def send(self, text, preview=False, markup=None, chat_id=None):
         """Send one HTML message, obeying a 429's retry_after once."""
         payload = {
-            "chat_id": self.chat_id,
+            "chat_id": str(chat_id) if chat_id is not None else self.chat_id,
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": not preview,
@@ -186,7 +237,8 @@ class TelegramNotifier:
             self._last_send = time.monotonic()
             return self._call("sendMessage", payload)
 
-    def send_postings(self, jobs, buttons=True, key_of=None, country=None):
+    def send_postings(self, jobs, buttons=True, key_of=None, country=None,
+                      chat_id=None):
         """Send one message per posting. Returns {job_key: message_id}.
 
         The message_id is the whole reason this returns a mapping rather than
@@ -209,7 +261,8 @@ class TelegramNotifier:
                 link = job.apply_url or job.url
                 result = self.send(
                     format_posting(job, country),
-                    markup=keyboard(key, link) if buttons else None)
+                    markup=keyboard(key, link) if buttons else None,
+                    chat_id=chat_id)
                 if isinstance(result, dict) and result.get("message_id"):
                     sent[key] = result["message_id"]
             except TelegramError as e:
