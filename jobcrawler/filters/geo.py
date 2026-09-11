@@ -44,32 +44,54 @@ NON_US = re.compile(
 NON_US_TZ = re.compile(r"\b(cet|cest|eet|eest|bst|ist|gmt\s*[+±])\b", re.I)
 
 
-def us_status(text):
-    """Grade a location string: 'us', 'worldwide', 'no', or 'unknown'.
+def home_status(text, country=None):
+    """Grade a location string against one country's answer.
 
-    Order matters here. An explicit US signal — the country named, or a
+    Returns 'us' when the posting accepts an applicant based in `country`,
+    'no' when it is fenced somewhere else, 'worldwide' when it names no
+    fence at all, and 'unknown' when there is nothing to read. The 'us'
+    spelling is kept for the home case however the country is set: the
+    string is a verdict — "yes, you qualify" — and every caller, record and
+    test already reads it that way. Renaming it per country would mean the
+    reason strings, the CSV column and the --strict-us flag all had to move
+    with it, for no gain to anyone.
+
+    Order matters here. An explicit home signal — the country named, or a
     ", CA" style abbreviation — is checked first and wins outright. Only
     then is the posting tested for another region, and the substring pass
-    over STATES runs last of the three: it is much the loosest test, and
-    going first it claims "Yorkshire" for New York, "Hampshire" for New
-    Hampshire and "Mexico City" for New Mexico.
+    over the region names runs last of the three: it is much the loosest
+    test, and going first it claims "Yorkshire" for New York, "Hampshire"
+    for New Hampshire and "Mexico City" for New Mexico.
     """
+    from .countries import US
+    home = country or US
     if not text:
         return "unknown"
     t = text.strip()
-    if NON_US_TZ.search(t) and not US_HINT.search(t):
+    if NON_US_TZ.search(t) and not home.hint.search(t):
         return "no"
-    if US_HINT.search(t):
+    if home.hint.search(t):
         return "us"
-    if set(re.findall(r",\s*([A-Z]{2})\b", t)) & ABBREV:
+    if set(re.findall(r",\s*([A-Z]{2})\b", t)) & home.abbrev:
         return "us"
-    if NON_US.search(t):
+    codes = set(re.findall(r",\s*([A-Z]{2})\b", t))
+    if home.foreign.search(t) or (codes & home.foreign_abbrev):
         return "no"
-    if any(s in t.lower() for s in STATES):
+    if home.regions.search(t.lower()):
         return "us"
     if WORLDWIDE.search(t):
         return "worldwide"
     return "unknown"
+
+
+def us_status(text):
+    """Grade a location string for a US applicant.
+
+    The name every source and test already calls. It is home_status() with
+    the country left at its default, kept so that widening the crawler to a
+    second country changes nothing for the one it was written for.
+    """
+    return home_status(text)
 
 
 # Ashby names the country outright, so US-ness never has to be guessed from

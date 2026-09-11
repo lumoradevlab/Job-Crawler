@@ -41,6 +41,9 @@ class FilterConfig:
     # behaves exactly as it did.
     subject: Optional[object] = None
     role: Optional[object] = None
+    # The country this run is looking for work in. Left None the rules grade
+    # for a US applicant, which is what every existing caller and test means.
+    country: Optional[object] = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,10 @@ class CrawlConfig:
     pages: int = 5
     days: int = 60
     level: Optional[str] = None
+    # Which national index a keyed source queries, and what LinkedIn is
+    # pinned to. Carried here as well as on the filters because a source
+    # asks for a country while the gate grades one.
+    country: Optional[object] = None
     delay: float = 4.0
     details: bool = False
     discover: bool = False

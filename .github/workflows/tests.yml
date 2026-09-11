@@ -33,6 +33,7 @@ jobs:
           python test_notify.py
           python test_roles.py
           python test_taps.py
+          python test_countries.py
 
       - name: The package imports and the CLI answers
         run: |

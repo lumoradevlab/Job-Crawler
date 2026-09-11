@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timedelta
 
 from ..roles.profiles import NOT_TECHNICAL, ROLE_WORDS
-from .geo import us_status
+from .geo import home_status, us_status
 from .workplace import HYBRID_SPLIT, ONSITE, REMOTE_HINT
 
 
@@ -126,7 +126,8 @@ def rejection(job, filters):
             office.group(0).strip(),)
 
     if not filters.anywhere:
-        status = job.us or us_status(job.location)
+        status = job.us or home_status(job.location,
+                                       getattr(filters, "country", None))
         if status == "no":
             return "region: fenced outside the US (%s)" % (
                 job.location or "no location given",)

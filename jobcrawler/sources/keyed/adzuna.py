@@ -3,7 +3,7 @@
 import time
 import urllib.parse
 
-from ...filters.geo import us_status
+from ...filters.geo import home_status
 from ...filters.rules import relevant
 from ...filters.workplace import REMOTE_HINT, REMOTE_STRONG
 from ...models import row
@@ -11,7 +11,7 @@ from ...parse.html import strip_tags
 from .base import JSON_ONLY, need_keys
 
 
-ADZUNA_SEARCH = ("https://api.adzuna.com/v1/api/jobs/us/search/{page}"
+ADZUNA_SEARCH = ("https://api.adzuna.com/v1/api/jobs/{country}/search/{page}"
                  "?app_id={app_id}&app_key={app_key}&results_per_page=50"
                  "&what_phrase={phrase}&what={extra}&sort_by=date{age}")
 
@@ -28,12 +28,15 @@ def crawl_adzuna(cfg, ctx):
     if not keys:
         return []
     app_id, app_key = keys
+    from ...filters.countries import US
+    country = cfg.country or US
     age = f"&max_days_old={cfg.days}" if cfg.days else ""
     out = []
     for q in cfg.keywords:
         got = 0
         for page in range(1, max(1, min(cfg.pages, 10)) + 1):
             data = ctx.fetch.get_json(ADZUNA_SEARCH.format(
+                country=country.adzuna,
                 page=page, app_id=app_id, app_key=app_key,
                 phrase=urllib.parse.quote(q), extra="remote", age=age),
                 tries=2, headers=JSON_ONLY)
@@ -58,9 +61,11 @@ def crawl_adzuna(cfg, ctx):
                     (j.get("created") or "")[:10],
                     remote=bool(REMOTE_HINT.search(title))
                     or bool(REMOTE_STRONG.search(body)),
-                    # /jobs/us/ is the US index — a posting that reached
-                    # it is US-based whatever its city string looks like.
-                    us=("no" if us_status(label) == "no" else "us"),
+                    # The national index is authoritative: a posting that
+                    # reached /jobs/ca/ is in Canada whatever its city
+                    # string looks like, so only an explicit foreign fence
+                    # overrides it.
+                    us=("no" if home_status(label, country) == "no" else "us"),
                     description=body,
                     salary_min=None if predicted else j.get("salary_min"),
                     salary_max=None if predicted else j.get("salary_max"),
