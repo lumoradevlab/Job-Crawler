@@ -25,13 +25,19 @@ the API, not a preference, and it is why jobs carry a `tap_id`.
 import hashlib
 
 # One action per button, in the order they appear under a message.
-ACTIONS = ("applied", "saved", "rejected", "muted")
+ACTIONS = ("applied", "saved", "rejected", "muted",
+           # The apply flow. "opening" is the tap that opens the posting and
+           # asks whether you went through with it; "cancel" is the answer
+           # that you did not, and puts the original buttons back.
+           "opening", "cancel")
 
 LABELS = {
-    "applied": "✅ Applied",
+    "applied": "✅ I applied",
     "saved": "🔖 Save",
     "rejected": "🚫 Not for me",
     "muted": "🔕 Mute company",
+    "opening": "🚀 Apply",
+    "cancel": "← Didn't apply",
 }
 
 # What the message says about itself afterwards. A tapped message is rewritten
@@ -42,6 +48,8 @@ MARKS = {
     "saved": "🔖 Saved",
     "rejected": "🚫 Not for me",
     "muted": "🔕 Muted",
+    # "opening" never marks a message: it is a question, not a verdict.
+    "cancel": None,
 }
 
 # The toast Telegram shows on the button itself, within about a second. This
@@ -52,6 +60,8 @@ TOASTS = {
     "saved": "Saved",
     "rejected": "Won't show this again",
     "muted": "Muted — no more from this company",
+    "opening": "Opening — tell me if you apply",
+    "cancel": "No problem",
 }
 
 # 10 hex characters of SHA-1 over the job key. Collision odds across a state
@@ -86,15 +96,49 @@ def decode(data):
     return None, None
 
 
-def keyboard(job_key):
+# Which buttons a message carries in its resting state. "applied" is not
+# among them: applying starts by opening the posting, and a button claiming
+# you applied before you have seen the page is how /applied fills up with
+# jobs you only glanced at.
+RESTING = ("saved", "rejected", "muted")
+
+
+def keyboard(job_key, url=None):
     """The inline keyboard under one job message.
 
-    Two rows of two. One row of four is too narrow to read on a phone, and
-    four rows of one pushes the next posting off the screen.
+    A url button opens the posting in the reader's browser. Telegram sends
+    *no callback* for one — it is a link, not an action — so the bot cannot
+    learn the tap happened. That is why Apply is two buttons side by side:
+    the url one opens the page, and the callback one beside it tells us you
+    went, which is what turns the message into the confirm prompt.
+
+    Splitting them is not a workaround for a missing feature. A single
+    button cannot both open a page and report back, and a bot that assumed
+    opening meant applying would fill /applied with jobs you merely peeked
+    at, which is the one thing an application tracker must not do.
     """
-    buttons = [{"text": LABELS[a], "callback_data": encode(a, job_key)}
-               for a in ACTIONS]
-    return {"inline_keyboard": [buttons[:2], buttons[2:]]}
+    rows = []
+    if url:
+        rows.append([
+            {"text": LABELS["opening"], "url": url},
+            {"text": "✅ Applied?", "callback_data": encode("opening", job_key)},
+        ])
+    rows.append([{"text": LABELS[a], "callback_data": encode(a, job_key)}
+                 for a in RESTING])
+    return {"inline_keyboard": rows}
+
+
+def confirm_keyboard(job_key):
+    """What replaces the buttons once Apply has been opened.
+
+    Only two answers, because only two are true at this point: you applied,
+    or you did not. Leaving Save and Mute here would invite a third answer
+    to a yes/no question and leave the message in a state that means nothing.
+    """
+    return {"inline_keyboard": [[
+        {"text": LABELS["applied"], "callback_data": encode("applied", job_key)},
+        {"text": LABELS["cancel"], "callback_data": encode("cancel", job_key)},
+    ]]}
 
 
 def is_open(entry):

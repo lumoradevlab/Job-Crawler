@@ -59,6 +59,15 @@ def apply_tap(state, action, job_key, today):
     entry = state.get(job_key)
     if entry is None:
         return None
+    if action == "opening":
+        # A question, not a verdict. The job is untouched until it is
+        # answered — marking it here is exactly the bug this flow exists to
+        # avoid, where opening a page counts as having applied.
+        entry["asked_at"] = today
+        return entry
+    if action == "cancel":
+        entry.pop("asked_at", None)
+        return entry
     entry["state"] = action
     entry["acted_at"] = today
     if action == "muted":
@@ -113,10 +122,21 @@ def drain(notifier, state, today, report=None):
         entry = apply_tap(state, action, job_key, today)
         if entry is None:
             continue
-        applied += 1
+        if action not in ("opening", "cancel"):
+            applied += 1
 
         message_id = entry.get("message_id")
-        if message_id:
+        if not message_id:
+            continue
+
+        if action == "opening":
+            # The url button beside this one has already opened the posting;
+            # this only turns the message into the yes/no prompt.
+            notifier.ask_confirm(message_id, job_key)
+        elif action == "cancel":
+            notifier.restore_buttons(message_id, job_key,
+                                     entry.get("apply_url"))
+        else:
             text = (query.get("message") or {}).get("text") or entry.get("title", "")
             notifier.mark(message_id, _as_html(text), action)
 
