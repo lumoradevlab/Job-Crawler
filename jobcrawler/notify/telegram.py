@@ -67,7 +67,7 @@ def _salary(job):
     return f"{money(lo or hi)} {unit}"
 
 
-def format_posting(job):
+def format_posting(job, country=None):
     """One posting as a Telegram HTML message.
 
     The title links to the posting, so the message is actionable from the
@@ -77,6 +77,10 @@ def format_posting(job):
     """
     title = _esc(job.title or "Untitled role")
     head = f'<a href="{_esc(job.url)}">{title}</a>' if job.url else f"<b>{title}</b>"
+    # Only when a run says which country it is for. One feed needs no flag;
+    # two in the same chat do, because a worldwide posting names no country
+    # in its location and would otherwise read the same in both.
+    flag = getattr(country, "flag", "") if country else ""
     lines = [f"<b>{_esc(job.company)}</b>" if job.company else "", head]
 
     where = job.location or ("Remote" if job.remote else "")
@@ -94,7 +98,7 @@ def format_posting(job):
     # The source is worth stating: an ATS link is the company's own posting
     # and outlives the aggregator copy, and knowing which is which is how a
     # reader decides whether to trust the location.
-    lines.append(f"<i>via {_esc(job.source)}</i>")
+    lines.append(f"<i>via {_esc(job.source)}</i>" + (f" {flag}" if flag else ""))
 
     text = "\n".join(x for x in lines if x)
     return text[:MAX_MESSAGE]
@@ -182,7 +186,7 @@ class TelegramNotifier:
             self._last_send = time.monotonic()
             return self._call("sendMessage", payload)
 
-    def send_postings(self, jobs, buttons=True, key_of=None):
+    def send_postings(self, jobs, buttons=True, key_of=None, country=None):
         """Send one message per posting. Returns {job_key: message_id}.
 
         The message_id is the whole reason this returns a mapping rather than
@@ -199,7 +203,7 @@ class TelegramNotifier:
         for job in jobs:
             key = key_of(job) if key_of else job.url
             try:
-                result = self.send(format_posting(job),
+                result = self.send(format_posting(job, country),
                                    markup=keyboard(key) if buttons else None)
                 if isinstance(result, dict) and result.get("message_id"):
                     sent[key] = result["message_id"]

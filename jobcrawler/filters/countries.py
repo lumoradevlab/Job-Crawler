@@ -37,6 +37,9 @@ class Country:
     foreign_abbrev: frozenset
     adzuna: str           # Adzuna's index for it
     linkedin: str         # the location string LinkedIn resolves
+    # Shown on the message. Two feeds in one chat otherwise look identical
+    # for a worldwide posting, where the location names no country at all.
+    flag: str = ""
 
 
 # -- shared pieces -----------------------------------------------------------
@@ -117,6 +120,7 @@ US = Country(
     foreign_abbrev=frozenset("AB BC MB NB NL NS NT NU ON PE QC SK YT".split()),
     adzuna="us",
     linkedin="United States",
+    flag="🇺🇸",
 )
 
 
@@ -146,6 +150,7 @@ CA = Country(
         SC SD TN TX UT VT VA WA WV WI WY DC""".split()),
     adzuna="ca",
     linkedin="Canada",
+    flag="🇨🇦",
 )
 
 

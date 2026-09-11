@@ -166,5 +166,44 @@ class TestRejection(unittest.TestCase):
             self.assertIsNone(rejects("Anywhere", country))
 
 
+# ==========================================================================
+# Two feeds in one chat
+# ==========================================================================
+class TestTwoFeeds(unittest.TestCase):
+    """Both countries post to the same chat, so a message has to say which.
+
+    The location usually gives it away — "Toronto, ON" against "Remote - US"
+    — but a worldwide posting names no country at all and qualifies under
+    both. Those are the messages that would arrive twice looking identical.
+    """
+
+    def _posting(self, location="Anywhere"):
+        return c.row("adzuna", "Backend Engineer", "Shopify", location,
+                     "https://x.example/1", "2026-09-11")
+
+    def test_each_country_has_its_own_flag(self):
+        self.assertNotEqual(US.flag, CA.flag)
+        self.assertTrue(US.flag and CA.flag)
+
+    def test_a_worldwide_posting_is_distinguishable_between_feeds(self):
+        from jobcrawler.notify.telegram import format_posting
+        job = self._posting()
+        self.assertIn(CA.flag, format_posting(job, CA))
+        self.assertIn(US.flag, format_posting(job, US))
+
+    def test_one_feed_needs_no_flag(self):
+        # A run that never names a country is the single-feed case, and a
+        # flag there is noise rather than information.
+        from jobcrawler.notify.telegram import format_posting
+        out = format_posting(self._posting())
+        self.assertNotIn(US.flag, out)
+        self.assertNotIn(CA.flag, out)
+
+    def test_a_worldwide_posting_qualifies_in_both(self):
+        # Which is why it reaches both feeds, and why the flag is needed.
+        for country in (US, CA):
+            self.assertIsNone(rejects("Anywhere", country))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
