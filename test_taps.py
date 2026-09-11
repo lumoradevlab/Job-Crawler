@@ -26,6 +26,8 @@ class StubBot:
         self.sent = []
         self.acked = []
         self.offsets = []
+        self.confirmed = []
+        self.restored = []
 
     def updates(self, offset=None, limit=100):
         self.offsets.append(offset)
@@ -39,6 +41,14 @@ class StubBot:
 
     def mark(self, message_id, text, action):
         self.marked.append((message_id, action))
+        return True
+
+    def ask_confirm(self, message_id, job_key):
+        self.confirmed.append(message_id)
+        return True
+
+    def restore_buttons(self, message_id, job_key, url=None):
+        self.restored.append((message_id, url))
         return True
 
     def send(self, text, preview=False, markup=None):
@@ -92,15 +102,38 @@ class TestCallbackData(unittest.TestCase):
         for junk in ("", "nonsense", "applied", ":", "bogus:abc"):
             self.assertEqual(actions.decode(junk), (None, None))
 
-    def test_every_action_has_a_label_a_mark_and_a_toast(self):
+    def test_every_action_has_a_label_and_a_toast(self):
         for a in actions.ACTIONS:
             self.assertIn(a, actions.LABELS)
-            self.assertIn(a, actions.MARKS)
             self.assertIn(a, actions.TOASTS)
 
-    def test_the_keyboard_is_two_rows_of_two(self):
+    def test_only_verdicts_mark_a_message(self):
+        # "opening" is a question and "cancel" is its no. Neither is a
+        # verdict, so neither rewrites the message to claim one.
+        for a in ("applied", "saved", "rejected", "muted"):
+            self.assertTrue(actions.MARKS.get(a), a)
+        self.assertIsNone(actions.MARKS.get("opening"))
+        self.assertIsNone(actions.MARKS.get("cancel"))
+
+    def test_the_resting_keyboard_carries_an_apply_link(self):
+        rows = actions.keyboard("https://x.example/1",
+                                "https://apply.example/1")["inline_keyboard"]
+        self.assertEqual([len(r) for r in rows], [2, 3])
+        self.assertEqual(rows[0][0]["url"], "https://apply.example/1")
+        # The url button sends no callback, so the one beside it is what
+        # tells the bot the reader went to apply.
+        self.assertIn("callback_data", rows[0][1])
+
+    def test_a_posting_with_no_link_still_gets_its_buttons(self):
         rows = actions.keyboard("https://x.example/1")["inline_keyboard"]
-        self.assertEqual([len(r) for r in rows], [2, 2])
+        self.assertEqual([len(r) for r in rows], [3])
+        self.assertFalse(any("url" in b for r in rows for b in r))
+
+    def test_the_confirm_keyboard_offers_only_yes_or_no(self):
+        rows = actions.confirm_keyboard("https://x/1")["inline_keyboard"]
+        self.assertEqual([len(r) for r in rows], [2])
+        self.assertEqual({actions.decode(b["callback_data"])[0]
+                          for b in rows[0]}, {"applied", "cancel"})
 
 
 # ==========================================================================
@@ -198,6 +231,79 @@ class TestDrain(unittest.TestCase):
         self.assertEqual(applied, 3)
         self.assertEqual(st["https://x/2"]["state"], "saved")
         self.assertEqual(bot.acked, [3])
+
+
+# ==========================================================================
+# The apply flow
+# ==========================================================================
+class TestApplyFlow(unittest.TestCase):
+    """Apply opens the posting; only the reader can say they went through.
+
+    Telegram sends no callback for a url button and the employer's site
+    cannot report back, so "did you apply?" is a question the bot has to ask.
+    The state machine exists so that asking it never implies the answer.
+    """
+
+    def test_opening_does_not_mark_the_job_applied(self):
+        # The bug the whole flow exists to prevent: a tracker that fills
+        # with jobs you only glanced at is worse than no tracker.
+        st = state_with("https://x/1")
+        bot = StubBot([tap("https://x/1", "opening")])
+        taps.drain(bot, st, "2026-09-11")
+        self.assertEqual(st["https://x/1"]["state"], "sent")
+        self.assertNotIn("acted_at", st["https://x/1"])
+
+    def test_opening_turns_the_message_into_a_prompt(self):
+        st = state_with("https://x/1")
+        bot = StubBot([tap("https://x/1", "opening")])
+        taps.drain(bot, st, "2026-09-11")
+        self.assertEqual(bot.confirmed, [100])
+        self.assertEqual(bot.marked, [])
+
+    def test_opening_is_remembered_so_the_prompt_is_not_lost(self):
+        st = state_with("https://x/1")
+        taps.drain(StubBot([tap("https://x/1", "opening")]), st, "2026-09-11")
+        self.assertEqual(st["https://x/1"]["asked_at"], "2026-09-11")
+
+    def test_confirming_afterwards_marks_it_applied(self):
+        st = state_with("https://x/1")
+        taps.drain(StubBot([tap("https://x/1", "opening", 1)]), st, "2026-09-11")
+        bot = StubBot([tap("https://x/1", "applied", 2)])
+        taps.drain(bot, st, "2026-09-12")
+        self.assertEqual(st["https://x/1"]["state"], "applied")
+        self.assertEqual(st["https://x/1"]["acted_at"], "2026-09-12")
+        self.assertEqual(bot.marked, [(100, "applied")])
+
+    def test_declining_leaves_the_job_untouched(self):
+        st = state_with("https://x/1")
+        taps.drain(StubBot([tap("https://x/1", "opening", 1)]), st, "2026-09-11")
+        bot = StubBot([tap("https://x/1", "cancel", 2)])
+        taps.drain(bot, st, "2026-09-11")
+        self.assertEqual(st["https://x/1"]["state"], "sent")
+        self.assertNotIn("asked_at", st["https://x/1"])
+
+    def test_declining_puts_the_original_buttons_back(self):
+        st = state_with("https://x/1")
+        st["https://x/1"]["apply_url"] = "https://apply.example/1"
+        bot = StubBot([tap("https://x/1", "cancel")])
+        taps.drain(bot, st, "2026-09-11")
+        self.assertEqual(bot.restored, [(100, "https://apply.example/1")])
+
+    def test_neither_question_nor_its_no_counts_as_a_tap_applied(self):
+        # The count reported to the run is verdicts, not interactions.
+        st = state_with("https://x/1", "https://x/2")
+        applied, seen = taps.drain(
+            StubBot([tap("https://x/1", "opening", 1, cb="a"),
+                     tap("https://x/2", "cancel", 2, cb="b")]),
+            st, "2026-09-11")
+        self.assertEqual((applied, seen), (0, 2))
+
+    def test_a_job_can_be_opened_twice_without_harm(self):
+        st = state_with("https://x/1")
+        for i in (1, 2):
+            taps.drain(StubBot([tap("https://x/1", "opening", i)]),
+                       st, "2026-09-11")
+        self.assertEqual(st["https://x/1"]["state"], "sent")
 
 
 # ==========================================================================

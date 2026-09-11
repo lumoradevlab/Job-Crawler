@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .actions import MARKS, TOASTS, keyboard
+from .actions import MARKS, TOASTS, confirm_keyboard, keyboard
 
 API = "https://api.telegram.org/bot{token}/{method}"
 
@@ -203,8 +203,13 @@ class TelegramNotifier:
         for job in jobs:
             key = key_of(job) if key_of else job.url
             try:
-                result = self.send(format_posting(job, country),
-                                   markup=keyboard(key) if buttons else None)
+                # apply_url is the employer's own application page where a
+                # source states one; job.url is the posting, which is the
+                # right fallback and often the same page.
+                link = job.apply_url or job.url
+                result = self.send(
+                    format_posting(job, country),
+                    markup=keyboard(key, link) if buttons else None)
                 if isinstance(result, dict) and result.get("message_id"):
                     sent[key] = result["message_id"]
             except TelegramError as e:
@@ -256,6 +261,32 @@ class TelegramNotifier:
             # of them are long dead, and that is expected rather than an
             # error — the message edit below is what the reader actually sees.
             pass
+
+    def ask_confirm(self, message_id, job_key):
+        """Turn a message into the "did you apply?" prompt.
+
+        Only the keyboard changes — editMessageReplyMarkup, not
+        editMessageText — so the posting stays exactly as it was. The reader
+        has just opened this job in a browser and will come back to a
+        message they recognise.
+        """
+        try:
+            self._call("editMessageReplyMarkup",
+                       {"chat_id": self.chat_id, "message_id": message_id,
+                        "reply_markup": confirm_keyboard(job_key)})
+            return True
+        except TelegramError:
+            return False
+
+    def restore_buttons(self, message_id, job_key, url=None):
+        """Put the resting buttons back, after "Didn't apply"."""
+        try:
+            self._call("editMessageReplyMarkup",
+                       {"chat_id": self.chat_id, "message_id": message_id,
+                        "reply_markup": keyboard(job_key, url)})
+            return True
+        except TelegramError:
+            return False
 
     def mark(self, message_id, text, action):
         """Rewrite a tapped message to show what was done, and drop its buttons.

@@ -370,6 +370,12 @@ def main(argv=None):
             if key in ids:
                 entry["message_id"] = ids[key]
                 entry.setdefault("state", "sent")
+                # Kept so "Didn't apply" can rebuild the same keyboard it
+                # replaced; without it the restored Apply button would point
+                # at the posting where the source gave a separate page.
+                link = j.apply_url or j.url
+                if link:
+                    entry["apply_url"] = link
             state[key] = entry
         record_run(state, today, cfg.days, outcome.succeeded)
         save_state(state_path, state)
