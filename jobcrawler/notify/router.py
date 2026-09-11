@@ -139,6 +139,12 @@ def handle_setup(bot, subs, chat_id, data, callback_id=None):
 
     if value in COUNTRIES:
         sub.country = value
+        # Redraw before confirming, exactly as the role picker does. Without
+        # it the tick never appears and the old keyboard stays live, so a
+        # reader who taps again sees nothing happen twice — which reads as a
+        # broken bot even though the choice saved the first time.
+        bot.edit_markup(chat_id, _message_id(bot, chat_id),
+                        country_keyboard(sub.country))
         bot.send_to(chat_id, confirmation(sub))
     return True
 

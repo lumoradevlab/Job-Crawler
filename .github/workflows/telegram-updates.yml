@@ -1,0 +1,54 @@
+name: telegram updates
+
+# Every fifteen minutes, read what people have typed and tapped — and
+# nothing else. No crawl, so a run is seconds rather than minutes.
+#
+# This exists because of what the twice-daily schedule does to a newcomer.
+# Someone who types /start at noon would otherwise wait until the evening
+# run to be answered, staring at a bot that looks broken; most would be gone
+# before it replied. Fifteen minutes is not instant, but it is inside the
+# window where a person will still be looking.
+#
+# It is also what makes the buttons feel live: a mute tapped now takes
+# effect at the next crawl either way, but the message rewrites itself
+# within minutes instead of hours.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+# The subscriber file is written by both workflows, and a crawl run holds it
+# for minutes. Sharing one concurrency group with the crawl is what stops the
+# two racing and losing a signup.
+concurrency:
+  group: telegram-job-bot
+  cancel-in-progress: false
+
+jobs:
+  answer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore the subscriber file
+        uses: actions/cache@v4
+        with:
+          path: subscribers.json
+          key: jobcrawler-state-${{ github.run_id }}
+          restore-keys: |
+            jobcrawler-state-
+
+      - name: Install the package
+        run: pip install .
+
+      - name: Answer messages and taps
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: jobcrawler-serve --updates-only

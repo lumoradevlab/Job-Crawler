@@ -39,10 +39,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The whole bot rests on knowing which jobs it has already sent, and an
-      # Actions runner is destroyed after every run. Without this the state
-      # file starts empty each time, every posting looks new, and the chat
-      # gets the same jobs twice a day forever.
+      # Everything the bot knows about its readers lives in this one file —
+      # who they are, what they asked for, what they have been sent — and an
+      # Actions runner is destroyed after every run. Without the cache every
+      # subscriber vanishes twice a day and the survivors get the same jobs
+      # again forever.
       #
       # The cache key changes every run so each run writes a fresh entry;
       # restore-keys then matches the most recent previous one, which is how
@@ -51,10 +52,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            android_remote_jobs_seen.json
-            android_remote_jobs_archive.jsonl
-            canada_remote_jobs_seen.json
-            canada_remote_jobs_archive.jsonl
+            subscribers.json
           key: jobcrawler-state-${{ github.run_id }}
           restore-keys: |
             jobcrawler-state-
@@ -65,41 +63,14 @@ jobs:
       # One run per country, each with its own state file. Sharing one would
       # mean the first country to see a worldwide posting suppressed it for
       # the second — correct for a single feed, wrong when the point is two.
-      #
-      # `|| true` on the first: a country whose crawl fails must not stop the
-      # other from being sent. The step still reports a failure if the second
-      # one dies, so a genuinely broken run is still visible.
-      - name: Crawl and post US jobs
+      - name: Serve every subscriber
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
           ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
         run: |
-          jobcrawler-bot \
+          jobcrawler-serve \
             ${{ inputs.dry_run && '--dry-run' || '' }} \
-            ${{ inputs.newest && '--newest' || '' }} \
-            --country us \
-            --out android_remote_jobs \
             --days 14 \
             --max-messages 15
-
-      - name: Crawl and post Canadian jobs
-        if: always()
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
-          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
-        run: |
-          jobcrawler-bot \
-            ${{ inputs.dry_run && '--dry-run' || '' }} \
-            ${{ inputs.newest && '--newest' || '' }} \
-            --country ca \
-            --out canada_remote_jobs \
-            --days 14 \
-            --max-messages 15
-
-      # The state file is only useful to the *next* run, and the cache above
-      # saves it automatically at the end of a successful job. Nothing to do
-      # here — this comment exists so the absence is deliberate, not missing.
