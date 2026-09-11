@@ -231,6 +231,7 @@ class TestFloodGuard(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.out = os.path.join(self.dir, "run")
         self.sent = []
+        self.digests = []
 
         import jobcrawler.notify.bot as bot
         self.bot = bot
@@ -266,6 +267,19 @@ class TestFloodGuard(unittest.TestCase):
                 return {(key_of(j) if key_of else j.url): i
                         for i, j in enumerate(jobs)}
 
+            def send(self, text, preview=False, markup=None):
+                outer.digests.append(text)
+                return {"message_id": len(outer.digests)}
+
+            # No taps in these tests, but the methods have to exist: a
+            # missing one is swallowed by drain()'s except and the warning
+            # it prints is the only sign the path was never exercised.
+            def updates(self, offset=None, limit=100):
+                return []
+
+            def acknowledge(self, update_id):
+                pass
+
         bot.TelegramNotifier = Stub
         # Restored in tearDown: leaking these into the real environment is
         # what made an unrelated secrets test read 't' as its token.
@@ -298,16 +312,42 @@ class TestFloodGuard(unittest.TestCase):
         with open(self.out + "_seen.json") as fh:
             return [k for k in json.load(fh) if not k.startswith("_")]
 
-    def test_too_many_sends_none_and_writes_no_state(self):
-        # The default: a big batch is assumed to be a lost state file, and
-        # sending nothing is what makes that recoverable.
-        self.assertEqual(self._run("--max-messages", "10"), 3)
+    def test_the_overflow_is_summarised_not_refused(self):
+        # The cap was written when forty new postings meant a lost state
+        # file. With fourteen sources and seventeen role profiles forty is
+        # an ordinary day, so refusing became a failure on healthy runs.
+        self.assertEqual(self._run("--max-messages", "10"), 0)
+        self.assertEqual(len(self.sent), 10)
+        self.assertTrue(self.digests, "the overflow was never summarised")
+
+    def test_the_summary_names_what_it_holds(self):
+        self._run("--max-messages", "10")
+        self.assertIn("+30 more", self.digests[0])
+
+    def test_summarised_jobs_are_marked_seen_and_never_resent(self):
+        # The failure this guards against: a digest entry not written to
+        # state comes back as new tomorrow, and every tomorrow after.
+        self._run("--max-messages", "10")
+        self.assertEqual(len(self._seen()), 40)
+        self.sent.clear()
+        self.digests.clear()
+        self.assertEqual(self._run("--max-messages", "10"), 0)
+        self.assertEqual(self.sent, [])
+
+    def test_no_digest_restores_the_refusal(self):
+        # A genuinely lost state file is still worth stopping for, and only
+        # the reader knows which of the two they are looking at.
+        self.assertEqual(self._run("--max-messages", "10", "--no-digest"), 3)
         self.assertEqual(self.sent, [])
         self.assertFalse(os.path.exists(self.out + "_seen.json"))
 
     def test_newest_sends_exactly_the_limit(self):
         self.assertEqual(self._run("--max-messages", "10", "--newest"), 0)
         self.assertEqual(len(self.sent), 10)
+
+    def test_a_run_under_the_cap_sends_no_summary(self):
+        self._run("--max-messages", "100")
+        self.assertEqual(self.digests, [])
 
     def test_newest_sends_the_newest_ones(self):
         self._run("--max-messages", "5", "--newest")
