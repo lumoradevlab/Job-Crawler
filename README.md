@@ -1,14 +1,21 @@
-# Remote Android/Mobile job crawler
+# Remote software job crawler
 
-Collects **remote-in-the-USA** Android, Kotlin and mobile engineering job links
-from eighteen job boards in one pass. Python 3 stdlib only — no dependencies,
-now or later.
+Collects **remote** software and IT job links from eighteen job boards in one
+pass, grades them against the country you can actually work in, and — if you
+want — posts the new ones to Telegram twice a day. Python 3 stdlib only, no
+dependencies, now or later.
 
 ```bash
 git clone https://github.com/lumoradevlab/Job-Crawler
 cd Job-Crawler
-python3 crawler.py            # 8 default queries, remote US, last 60 days
+python3 crawler.py                        # Android roles, remote US, 60 days
+python3 crawler.py --role backend devops  # a different discipline
+python3 crawler.py --country ca           # Canadian roles instead
 ```
+
+Seventeen role profiles from `android` to `devops` to `all`, two countries,
+and a Telegram bot that remembers what you have already been shown — each of
+which has its own section below.
 
 Or install it, and get a `jobcrawler` command on your PATH:
 
@@ -24,6 +31,56 @@ python3 crawler.py --help     # from a clone
 python3 -m jobcrawler --help  # as a module
 jobcrawler --help             # installed
 ```
+
+## Which jobs: `--role`
+
+The title gate and the search queries move together — a gate keeping backend
+titles while the searches still ask boards for "Android Developer" returns
+nothing and looks like a broken crawler. So one flag swaps both.
+
+```bash
+python3 crawler.py --role backend
+python3 crawler.py --role backend devops     # combine them
+python3 crawler.py --role software           # every engineering discipline
+python3 crawler.py --role all                # …plus product, design and IT
+```
+
+| | |
+|---|---|
+| **Mobile** | `android` `ios` `mobile` |
+| **Web** | `frontend` `backend` `fullstack` |
+| **Infra & data** | `devops` `data` |
+| **Quality & safety** | `qa` `security` |
+| **Specialist** | `embedded` `gamedev` `itsupport` |
+| **Adjacent** | `product` `design` |
+| **Umbrella** | `software` `all` |
+
+`software` and `all` are built from the others, so a fix to one reaches them.
+The default is `android`, which is what this crawler was written for.
+
+"Manager", "lead" and "designer" are role nouns that only `product` and
+`design` accept. On an engineering profile they admit the jobs *about* the
+work rather than the work — "Product Manager, Mobile" matches the mobile
+subject and is not a mobile engineering job.
+
+## Where: `--country`
+
+```bash
+python3 crawler.py --country ca
+```
+
+`us` (default) and `ca`. The flag moves the region gate **and** the national
+index a keyed source queries, because a run gating for Canada while Adzuna is
+still pinned to `/jobs/us/` returns nothing.
+
+Each country actively rejects the other's regions rather than merely failing
+to accept them: without that, `Toronto, ON` grades *unknown* to a US run
+instead of *no*, and `--strict-us` keeps unlabelled postings where it drops
+foreign ones.
+
+One ambiguity is worth knowing about. `CA` is California **and** Canada's ISO
+code, so it cannot go in Canada's foreign list — `Remote - CA` there means
+Canada. `San Francisco, CA` is settled by the city name instead.
 
 Files written each run:
 
@@ -78,6 +135,71 @@ Every filter still applies — `--days`, `--strict-us`, `--min-salary`,
 `--must`/`--exclude` — so the archive doubles as a local database you can
 re-query without touching a board. A replay leaves the seen-history alone and
 adds nothing to the archive. `--no-archive` turns the appending off.
+
+## The Telegram bot
+
+A crawl on a schedule, with the new postings sent to a chat. It is a wrapper
+around an ordinary run rather than a second crawler: the pipeline already
+knows what is new, and a bot that decided that again would be a second
+implementation to keep in step with the first.
+
+```bash
+pip install .
+cp .env.example .env          # fill in the two Telegram values
+jobcrawler-bot --chat-id-help # how to get them
+jobcrawler-bot --check        # confirm they work
+jobcrawler-bot --dry-run      # crawl and print, send nothing
+jobcrawler-bot                # the real thing
+```
+
+Every job arrives as its own message with four buttons:
+
+| button | what it does |
+|---|---|
+| ✅ **Applied** | marks and dates it; listed by `/applied` |
+| 🔖 **Save** | listed by `/saved` |
+| 🚫 **Not for me** | this posting is never sent again |
+| 🔕 **Mute company** | nothing from them again, this posting included |
+
+Plus `/applied`, `/saved`, `/muted` and `/help` as typed commands.
+
+**Rejecting is not muting.** A badly-titled role is not a bad employer, and
+collapsing the two would cost you every future opening there on one tap.
+
+Taps are read at the *start* of the next run, before the crawl — a company
+muted this morning must not reappear in this morning's results. The button
+itself answers within about a second, so only the consequence waits.
+
+Past `--max-messages`, the newest get a message each and the rest arrive as
+one summary with links. Nothing is lost and nothing floods. `--no-digest`
+restores the older behaviour of refusing outright, which is still the right
+answer for the case the cap was written for: a lost state file.
+
+### On a schedule
+
+`.github/workflows/telegram-bot.yml` runs it twice daily on GitHub Actions,
+free, whether or not your machine is on. Set four repository secrets under
+**Settings → Secrets and variables → Actions**:
+
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ADZUNA_APP_ID`, `ADZUNA_APP_KEY`.
+
+The workflow caches `<out>_seen.json` between runs. Without that an Actions
+runner starts empty every time, every posting looks new, and the same jobs
+arrive twice a day forever.
+
+It crawls both countries, each with its own state file — sharing one would
+mean whichever ran first suppressed every worldwide posting for the second.
+Both feeds land in the same chat, so each message carries a 🇺🇸 or 🇨🇦: the
+location usually gives the country away, but a worldwide posting names none
+and qualifies under both.
+
+### Credentials
+
+Read from the environment, or from a git-ignored `.env`. Never from a
+committed file — see `.env.example` for every variable and where each key
+comes from. The real environment always wins over `.env`, so CI secrets
+cannot be shadowed by a stray file in a checkout, and the token is redacted
+in logs because an Actions log on a public repo is public.
 
 ## Sources
 
@@ -291,7 +413,9 @@ python3 crawler.py -k "Kotlin Developer" "Compose Developer" \
 
 | flag | meaning |
 |---|---|
-| `-k, --keywords` | search queries (default: 8 mobile/Android variants) |
+| `--role` | which discipline(s) to crawl (default `android`) — see above |
+| `--country` | `us` (default) or `ca`; moves the region gate and the national index |
+| `-k, --keywords` | search queries (default: the role's own) |
 | `--source` | which boards to crawl (default: linkedin greenhouse ashby lever workable smartrecruiters himalayas adzuna usajobs builtin arc wwr hn) |
 | `-l, --location` | LinkedIn location, default `United States` |
 | `-p, --pages` | pages per query, 10 jobs each (default 5) |
@@ -308,7 +432,7 @@ python3 crawler.py -k "Kotlin Developer" "Compose Developer" \
 | `--details` | fetch each LinkedIn posting: description + Easy Apply flag |
 | `--easy-apply-only` | keep only Easy Apply jobs (requires `--details`) |
 | `--must` / `--exclude` | keyword filters |
-| `--no-filter` | keep every hit, skip the Android/mobile title gate |
+| `--no-filter` | keep every hit, skip the title gate entirely |
 | `--why` | explain every rejection, and write `<out>_rejected.csv` |
 | `-q, --quiet` | drop the per-source progress; results and warnings still print |
 | `--strict-us` | require the posting to name the US (drops worldwide/unlabelled) |
@@ -321,18 +445,35 @@ python3 crawler.py -k "Kotlin Developer" "Compose Developer" \
 | `--reset-seen` | forget the run history and start again |
 | `--state` | history file, default `<out>_seen.json` |
 
+### Bot-only flags
+
+| flag | meaning |
+|---|---|
+| `--check` | verify the credentials and exit without crawling |
+| `--chat-id-help` | how to get a bot token and a chat id |
+| `--dry-run` | crawl and print what would be sent, send nothing |
+| `--max-messages` | individual messages per run before the rest become a summary |
+| `--no-digest` | over the cap, refuse to send rather than summarising |
+| `--newest` | over the cap, send the newest N and mark the rest seen |
+| `--no-buttons` | plain messages, and do not read taps |
+
 ## Tests
 
 ```bash
 python3 test_crawler.py            # grading, parsing, stores
 python3 test_net.py                # retry, pacing, failure accounting
 python3 test_pipeline.py           # collect, select, the new/seen split
+python3 test_roles.py              # the role profiles and their gates
+python3 test_countries.py          # the region gate, per country
+python3 test_notify.py             # message formatting, secrets, the cap
+python3 test_taps.py               # buttons, taps and the tap ledger
 python3 test_crawler.py -v         # naming each case
 python3 test_crawler.py TestKeep   # one class
 ```
 
-190 cases, none of which touch the network — the whole suite runs in well
-under a second, and CI never depends on a job board being up.
+306 cases, none of which touch the network — the whole suite runs in well
+under a second, and CI never depends on a job board being up. The bot suites
+stub the notifier, so they never reach api.telegram.org either.
 
 That is possible because sources are handed their HTTP rather than importing
 it. A test constructs a `CrawlConfig` and a `RunContext` carrying a fetcher
@@ -342,7 +483,7 @@ that serves recorded payloads, and calls the source directly:
 jobs = crawl_serpapi(make_cfg(), make_ctx(fetch=Recording()))
 ```
 
-The largest group still covers the grading logic — `us_status()`, `keep()`,
+The largest group still covers the grading logic — `home_status()`, `keep()`,
 `parse_salary()`, `relative_date()` and the regexes behind them.
 
 This is where a regex tune proves it didn't break a case that used to work,
@@ -364,7 +505,8 @@ check them against real results:
 ## How it grades a posting
 
 Every source is normalised into one record and put through the same gate: an
-Android/mobile title, a genuine remote flag, and a US check.
+a title matching the chosen role, a genuine remote flag, and a
+country check.
 
 The US check is the fiddly part, because boards state it in free text. A
 posting fenced to another region is dropped; "Worldwide"/"Anywhere" is kept (a
@@ -419,7 +561,7 @@ python3 crawler.py --source greenhouse ashby --why
 
 ```
 [why] 1083 postings rejected (1078 of them by a source's own title gate)
-  not-mobile     1078   greenhouse 781, ashby 297
+  off-role       1078   greenhouse 781, ashby 297
   not-remote        5   greenhouse 5
   -> android_remote_jobs_rejected.csv
 ```
@@ -436,7 +578,8 @@ reported, so a posting breaking three of them names only the first:
 
 | reason | what it means |
 |---|---|
-| `not-mobile` | no Android/mobile word *and* role word in the title |
+| `off-role` | no role word *and* discipline word in the title |
+| `not-technical` | a sales, recruiting or support title in a tech org |
 | `must` / `exclude` | your own `--must` / `--exclude` filters |
 | `easy-apply` | `--easy-apply-only`, and this isn't one |
 | `not-remote` | the source never flagged it remote |
@@ -447,7 +590,7 @@ reported, so a posting breaking three of them names only the first:
 | `too-old` | outside the `--days` window |
 | `duplicate` | another source carried the same job on a better link |
 
-Two things worth knowing about the counts. `not-mobile` dominates every run
+Two things worth knowing about the counts. `off-role` dominates every run
 and is mostly uninteresting — it's every non-mobile role on the boards being
 crawled, which on Greenhouse is ~99% of them. And most sources apply that
 title gate themselves before paying for a detail fetch, so those drops are
