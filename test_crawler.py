@@ -275,6 +275,54 @@ class TestRelevanceGate(unittest.TestCase):
 
 
 # ==========================================================================
+# Ashby's isRemote, which is true three times in four
+# ==========================================================================
+class TestAshbyRemoteness(unittest.TestCase):
+    """The location outranks the flag, because the flag means almost nothing.
+
+    Measured across 2,253 live postings from 14 Ashby boards: 1,693 carry
+    isRemote=true and 1,401 of those name only a city. Notion, Linear,
+    Strava and Sentry all sit at 100%, so it is not one company's data
+    entry — the field is simply not a workplace statement.
+    """
+
+    def remote(self, label, flag=True, **over):
+        from jobcrawler.sources.ats.ashby import _is_remote
+        return _is_remote({"isRemote": flag, **over}, label)
+
+    def test_a_city_alone_is_not_remote_however_the_flag_reads(self):
+        # "Data Center Design Engineer, San Francisco" was isRemote=true.
+        for label in ["San Francisco", "New York City", "London",
+                      "San Francisco / Mountain View"]:
+            with self.subTest(label=label):
+                self.assertFalse(self.remote(label), label)
+
+    def test_a_label_saying_remote_is_remote(self):
+        for label in ["Remote - US", "Remote", "US - Remote",
+                      "San Francisco / Seattle / US - Remote"]:
+            with self.subTest(label=label):
+                self.assertTrue(self.remote(label), label)
+
+    def test_an_office_label_beats_a_true_flag(self):
+        self.assertFalse(self.remote("San Francisco (Hybrid)"))
+        self.assertFalse(self.remote("New York — In-Office"))
+
+    def test_a_remote_word_beats_an_office_word(self):
+        # "Remote or Hybrid" offers both, and the board is stating that
+        # remote is genuinely on the table.
+        self.assertTrue(self.remote("Remote or Hybrid — Austin, TX"))
+
+    def test_the_flag_still_decides_when_no_place_is_named(self):
+        # Where it is still worth something: a posting with no location is
+        # the shape a genuinely remote role most often arrives in.
+        self.assertTrue(self.remote("", flag=True))
+        self.assertFalse(self.remote("", flag=False))
+
+    def test_a_location_saying_remote_survives_a_false_flag(self):
+        self.assertTrue(self.remote("Remote - US", flag=False))
+
+
+# ==========================================================================
 # keep() — the single gate, exercised end to end
 # ==========================================================================
 class TestKeep(unittest.TestCase):
