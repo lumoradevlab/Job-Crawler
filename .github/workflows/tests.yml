@@ -34,6 +34,7 @@ jobs:
           python test_roles.py
           python test_taps.py
           python test_countries.py
+          python test_serve.py
 
       - name: The package imports and the CLI answers
         run: |

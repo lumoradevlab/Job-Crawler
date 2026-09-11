@@ -9,6 +9,9 @@
 !tests/**/*.json
 !.github/**/*.json
 
+# Subscriber data — other people's job searches, never committed.
+subscribers.json
+
 # macOS
 .DS_Store
 

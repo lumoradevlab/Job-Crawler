@@ -31,6 +31,7 @@ Issues = "https://github.com/lumoradevlab/Job-Crawler/issues"
 [project.scripts]
 jobcrawler = "jobcrawler.cli:main"
 jobcrawler-bot = "jobcrawler.notify.bot:main"
+jobcrawler-serve = "jobcrawler.notify.serve:main"
 
 [tool.setuptools.packages.find]
 include = ["jobcrawler*"]
