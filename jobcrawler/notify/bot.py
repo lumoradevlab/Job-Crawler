@@ -330,7 +330,7 @@ def main(argv=None):
         from .telegram import format_posting
         for j in fresh:
             report.result("-" * 60)
-            report.result(format_posting(j))
+            report.result(format_posting(j, cfg.country))
         if digest:
             from .telegram import format_digest
             report.result("-" * 60)
@@ -342,7 +342,7 @@ def main(argv=None):
         return 0
 
     ids = notifier.send_postings(fresh, buttons=not args.no_buttons,
-                                 key_of=job_key)
+                                 key_of=job_key, country=cfg.country)
     sent = len(ids)
     if digest:
         from .telegram import format_digest

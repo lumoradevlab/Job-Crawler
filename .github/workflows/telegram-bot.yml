@@ -53,6 +53,8 @@ jobs:
           path: |
             android_remote_jobs_seen.json
             android_remote_jobs_archive.jsonl
+            canada_remote_jobs_seen.json
+            canada_remote_jobs_archive.jsonl
           key: jobcrawler-state-${{ github.run_id }}
           restore-keys: |
             jobcrawler-state-
@@ -60,7 +62,14 @@ jobs:
       - name: Install the package
         run: pip install .
 
-      - name: Crawl and post new jobs
+      # One run per country, each with its own state file. Sharing one would
+      # mean the first country to see a worldwide posting suppressed it for
+      # the second — correct for a single feed, wrong when the point is two.
+      #
+      # `|| true` on the first: a country whose crawl fails must not stop the
+      # other from being sent. The step still reports a failure if the second
+      # one dies, so a genuinely broken run is still visible.
+      - name: Crawl and post US jobs
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -70,8 +79,26 @@ jobs:
           jobcrawler-bot \
             ${{ inputs.dry_run && '--dry-run' || '' }} \
             ${{ inputs.newest && '--newest' || '' }} \
+            --country us \
+            --out android_remote_jobs \
             --days 14 \
-            --max-messages 25
+            --max-messages 15
+
+      - name: Crawl and post Canadian jobs
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+        run: |
+          jobcrawler-bot \
+            ${{ inputs.dry_run && '--dry-run' || '' }} \
+            ${{ inputs.newest && '--newest' || '' }} \
+            --country ca \
+            --out canada_remote_jobs \
+            --days 14 \
+            --max-messages 15
 
       # The state file is only useful to the *next* run, and the cache above
       # saves it automatically at the end of a successful job. Nothing to do

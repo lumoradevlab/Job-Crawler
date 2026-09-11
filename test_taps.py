@@ -308,7 +308,7 @@ class TestRunIntegration(unittest.TestCase):
             def check(self):
                 return "stub"
 
-            def send_postings(self, jobs, buttons=True, key_of=None):
+            def send_postings(self, jobs, buttons=True, key_of=None, country=None):
                 outer.sent.extend(jobs)
                 return {(key_of(j) if key_of else j.url): 500 + i
                         for i, j in enumerate(jobs)}
