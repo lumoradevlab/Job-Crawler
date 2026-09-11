@@ -19,6 +19,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .actions import MARKS, TOASTS, keyboard
+
 API = "https://api.telegram.org/bot{token}/{method}"
 
 # Telegram hard-limits a message to 4096 characters. Nothing here comes close
@@ -160,7 +162,7 @@ class TelegramNotifier:
         me = self._call("getMe", {}) or {}
         return me.get("username") or "?"
 
-    def send(self, text, preview=False):
+    def send(self, text, preview=False, markup=None):
         """Send one HTML message, obeying a 429's retry_after once."""
         payload = {
             "chat_id": self.chat_id,
@@ -168,6 +170,8 @@ class TelegramNotifier:
             "parse_mode": "HTML",
             "disable_web_page_preview": not preview,
         }
+        if markup:
+            payload["reply_markup"] = markup
         self._pace()
         try:
             return self._call("sendMessage", payload)
@@ -178,22 +182,101 @@ class TelegramNotifier:
             self._last_send = time.monotonic()
             return self._call("sendMessage", payload)
 
-    def send_postings(self, jobs):
-        """Send one message per posting. Returns how many arrived.
+    def send_postings(self, jobs, buttons=True, key_of=None):
+        """Send one message per posting. Returns {job_key: message_id}.
+
+        The message_id is the whole reason this returns a mapping rather than
+        a count. Editing a message after its button is tapped needs the id
+        Telegram assigned when it was sent, and that id exists nowhere else —
+        so a send that does not capture it cannot be followed up, and the
+        buttons would have nothing to rewrite.
 
         One posting failing must not silence the rest: a single unsendable
         title (or a transient 5xx on one call) is worth a warning, not the
         loss of the other nine jobs found that morning.
         """
-        sent = 0
+        sent = {}
         for job in jobs:
+            key = key_of(job) if key_of else job.url
             try:
-                self.send(format_posting(job))
-                sent += 1
+                result = self.send(format_posting(job),
+                                   markup=keyboard(key) if buttons else None)
+                if isinstance(result, dict) and result.get("message_id"):
+                    sent[key] = result["message_id"]
             except TelegramError as e:
                 if self.report:
                     self.report.warn(f"  ! telegram: {job.title[:40]!r}: {e}")
         return sent
+
+    # -- receiving ---------------------------------------------------------
+    def updates(self, offset=None, limit=100):
+        """Every update waiting, oldest first.
+
+        Telegram holds an undelivered update for 24 hours and then drops it,
+        so a schedule that stops running for a day loses whatever was tapped
+        in the meantime. Nothing here can prevent that; what it can do is not
+        make it worse, which is why acknowledging is a separate step — see
+        acknowledge().
+        """
+        payload = {"timeout": 0, "limit": limit,
+                   "allowed_updates": ["callback_query", "message"]}
+        if offset is not None:
+            payload["offset"] = offset
+        return self._call("getUpdates", payload) or []
+
+    def acknowledge(self, update_id):
+        """Tell Telegram a batch is handled, so it is not served again.
+
+        getUpdates with an offset one past the last id is the only way to
+        confirm receipt. Until that call the same taps come back every run —
+        which for a mute is not merely noisy but wrong, since re-applying it
+        would undo a later unmute.
+        """
+        self._call("getUpdates", {"offset": update_id + 1, "limit": 1,
+                                  "timeout": 0})
+
+    def answer(self, callback_id, action):
+        """The toast on the button itself, within about a second.
+
+        This is what makes a twelve-hour batch delay tolerable: the tap is
+        acknowledged now and only its consequence waits. A callback left
+        unanswered shows the reader a spinner until it times out, which reads
+        as a broken bot.
+        """
+        try:
+            self._call("answerCallbackQuery",
+                       {"callback_query_id": callback_id,
+                        "text": TOASTS.get(action, "Done")})
+        except TelegramError:
+            # A callback id expires after about a minute. On a batch run most
+            # of them are long dead, and that is expected rather than an
+            # error — the message edit below is what the reader actually sees.
+            pass
+
+    def mark(self, message_id, text, action):
+        """Rewrite a tapped message to show what was done, and drop its buttons.
+
+        Rewritten rather than deleted: the posting is still the thing worth
+        looking at, and a feed that erases what you touched cannot be
+        reviewed. Dropping the keyboard is what stops a second tap on a
+        decision already made.
+        """
+        mark = MARKS.get(action)
+        body = f"{text}\n\n<b>{mark}</b>" if mark else text
+        try:
+            self._call("editMessageText", {
+                "chat_id": self.chat_id, "message_id": message_id,
+                "text": body[:MAX_MESSAGE], "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            })
+            return True
+        except TelegramError as e:
+            # "message is not modified" and "message to edit not found" are
+            # both ordinary here — a message deleted by the reader, or a tap
+            # already applied by an earlier run.
+            if self.report:
+                self.report.warn(f"  ! telegram: could not mark {message_id}: {e}")
+            return False
 
 
 class _Throttled(Exception):
