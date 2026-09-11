@@ -1,0 +1,54 @@
+name: New source
+description: A job board the crawler should read
+labels: ["source"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The crawler reads eighteen boards, and the ones that work are the
+        ones with a documented endpoint. A board with no API needs its HTML
+        scraped, which breaks whenever the markup changes — so the first
+        question is always whether there is a real endpoint behind it.
+
+  - type: input
+    id: board
+    attributes:
+      label: Which board
+      placeholder: "Otta — https://otta.com"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: access
+    attributes:
+      label: How can it be read?
+      options:
+        - Public API, no key
+        - API with a free key
+        - API with a paid key
+        - RSS or XML feed
+        - No API — would need scraping
+        - Don't know
+    validations:
+      required: true
+
+  - type: input
+    id: endpoint
+    attributes:
+      label: The endpoint, if you know it
+      description: A URL that returns jobs. A curl command that works is ideal.
+    validations:
+      required: false
+
+  - type: textarea
+    id: why
+    attributes:
+      label: What it carries that the current eighteen don't
+      description: >
+        Volume alone is rarely the answer — most aggregators carry the same
+        postings the ATS boards already have, and the dedupe drops them.
+        A board is worth adding when it has jobs nothing else does, or
+        states something the others don't (salary, a real remote flag, a
+        country fence).
+    validations:
+      required: true

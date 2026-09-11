@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: A posting was wrongly kept or dropped
+    url: https://github.com/lumoradevlab/Job-Crawler#why-isnt-it-in-the-results
+    about: >
+      Run with --why first — it names the rule that dropped each posting,
+      and the README explains every rule. Open a bug report if the rule
+      that fired is the wrong one.
