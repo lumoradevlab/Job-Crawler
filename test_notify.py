@@ -100,21 +100,29 @@ class TestSend(unittest.TestCase):
 
     def test_each_posting_becomes_its_own_message(self):
         bot = Fake()
-        sent = bot.send_postings([job(title="Android Engineer"),
-                                  job(title="Mobile Engineer")])
-        self.assertEqual(sent, 2)
+        sent = bot.send_postings([job(title="Android Engineer",
+                                      url="https://x.example/1"),
+                                  job(title="Mobile Engineer",
+                                      url="https://x.example/2")])
+        # A mapping, not a count: the message_id it carries is what a later
+        # tap edits, and it exists nowhere but the send response.
+        self.assertEqual(len(sent), 2)
         self.assertEqual(len(bot.sent), 2)
+        self.assertTrue(all(isinstance(v, int) for v in sent.values()))
 
     def test_one_failed_posting_does_not_silence_the_others(self):
         # A single unsendable title must cost one job, not the whole morning.
         bot = Fake(fail_on=["Poison"], report=c.NullReporter())
-        sent = bot.send_postings([job(title="Android Engineer"),
-                                  job(title="Poison Android Engineer"),
-                                  job(title="Mobile Engineer")])
-        self.assertEqual(sent, 2)
+        sent = bot.send_postings([job(title="Android Engineer",
+                                      url="https://x.example/1"),
+                                  job(title="Poison Android Engineer",
+                                      url="https://x.example/2"),
+                                  job(title="Mobile Engineer",
+                                      url="https://x.example/3")])
+        self.assertEqual(len(sent), 2)
 
     def test_sending_nothing_is_not_an_error(self):
-        self.assertEqual(Fake().send_postings([]), 0)
+        self.assertEqual(Fake().send_postings([]), {})
 
     def test_link_previews_are_off_so_the_feed_stays_scannable(self):
         bot = Fake()
@@ -253,9 +261,10 @@ class TestFloodGuard(unittest.TestCase):
             def check(self):
                 return "stubbot"
 
-            def send_postings(self, jobs):
+            def send_postings(self, jobs, buttons=True, key_of=None):
                 outer.sent.extend(jobs)
-                return len(jobs)
+                return {(key_of(j) if key_of else j.url): i
+                        for i, j in enumerate(jobs)}
 
         bot.TelegramNotifier = Stub
         # Restored in tearDown: leaking these into the real environment is

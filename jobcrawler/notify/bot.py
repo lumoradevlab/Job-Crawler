@@ -34,6 +34,7 @@ from ..store.archive import Archive
 from ..store.seen import (catchup_days, job_key, load_state, record_run,
                           save_state)
 from .secrets import load_env_file, redact
+from .taps import drain, muted_companies, suppressed
 from .telegram import TelegramError, TelegramNotifier
 
 # The schedule's sources: every documented API needing no key, plus Adzuna
@@ -132,6 +133,9 @@ examples:
                         "seen, not lost — they stay in the archive. This is "
                         "the flag for adding a source, where a large batch "
                         "is a real backfill rather than a lost state file")
+    p.add_argument("--no-buttons", action="store_true",
+                   help="send plain messages with no Applied/Save/Mute "
+                        "buttons, and do not read taps")
     p.add_argument("--dry-run", action="store_true",
                    help="crawl and print what would be sent, send nothing")
     p.add_argument("--check", action="store_true",
@@ -234,6 +238,15 @@ def main(argv=None):
     state = load_state(state_path)
     today = datetime.now().strftime("%Y-%m-%d")
 
+    # Before the crawl, never after: a company muted this morning must not
+    # reappear in this morning's results. State is saved immediately so a
+    # crash between here and the send cannot lose a tap that Telegram has
+    # already been told we handled.
+    if notifier is not None and not args.no_buttons:
+        applied, _ = drain(notifier, state, today, report)
+        if applied:
+            save_state(state_path, state)
+
     # The same catch-up the crawler does: after the first sweep there is no
     # reason to ask for 14 days again, only for what appeared since.
     days = catchup_days(state, args.days, today, args.source)
@@ -241,6 +254,22 @@ def main(argv=None):
 
     outcome = collect(cfg, ctx, SOURCES)
     jobs, _ = select(outcome.postings, cfg.filters)
+
+    # A muted company is dropped from the report but stays in the archive:
+    # muting is a statement about what to be shown, not about what happened
+    # in the market, and --replay must still be able to rebuild the record.
+    muted = muted_companies(state)
+    turned_down = suppressed(state)
+    if muted or turned_down:
+        before = len(jobs)
+        jobs = [j for j in jobs
+                if j.company.strip().lower() not in muted
+                and job_key(j) not in turned_down]
+        if before != len(jobs):
+            report.line(f"{before - len(jobs)} hidden by your taps "
+                        f"({len(muted)} muted compan"
+                        f"{'y' if len(muted) == 1 else 'ies'})")
+
     fresh = split_new(jobs, state, today)
 
     # Archived before anything is sent: the archive is the only full record,
@@ -289,15 +318,25 @@ def main(argv=None):
                       f"Nothing was sent and no state was written.")
         return 0
 
-    sent = notifier.send_postings(fresh)
+    ids = notifier.send_postings(fresh, buttons=not args.no_buttons,
+                                 key_of=job_key)
+    sent = len(ids)
     report.result(f"sent {sent} of {len(fresh)} to telegram")
 
     # Only now. A job is "reported" when Telegram has it, not when we decided
     # to send it — see the module docstring.
     if sent:
         for j in jobs:
-            state[job_key(j)] = {"first_seen": j.first_seen,
-                                 "title": j.title, "company": j.company}
+            key = job_key(j)
+            entry = state.get(key) or {}
+            entry.update({"first_seen": j.first_seen, "title": j.title,
+                          "company": j.company})
+            # Only for what was actually sent: the id is what a later tap
+            # edits, and a job we never messaged has no message to edit.
+            if key in ids:
+                entry["message_id"] = ids[key]
+                entry.setdefault("state", "sent")
+            state[key] = entry
         record_run(state, today, cfg.days, outcome.succeeded)
         save_state(state_path, state)
     else:
