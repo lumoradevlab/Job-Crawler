@@ -409,7 +409,12 @@ def format_digest(jobs, shown):
     with buttons; the tail is worth a line each, with a link. Nothing is
     lost and nothing floods.
     """
-    lines = [f"<b>+{len(jobs)} more</b> — newest {shown} sent above", ""]
+    # "newest 0 sent above" would be a lie about a message that is not
+    # there, which happens when a subscriber's per-run budget is already
+    # spent by an earlier country.
+    header = (f"<b>+{len(jobs)} more</b> — newest {shown} sent above" if shown
+              else f"<b>{len(jobs)} more</b>")
+    lines = [header, ""]
     for job in jobs:
         title = _esc(job.title or "Untitled role")[:70]
         link = f'<a href="{_esc(job.url)}">{title}</a>' if job.url else title

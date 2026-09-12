@@ -7,7 +7,7 @@ to iterate and somewhere to keep each reader's answers.
 
 Three things are per person and cannot be shared:
 
-    roles, country   what they asked for
+    roles, countries  what they asked for
     seen             what they have already been sent
     muted, applied   what they have said about it
 
@@ -45,24 +45,44 @@ def seen_key(url):
     return tap_id(url or "")
 
 
+def countries_of(record):
+    """The countries in a stored row, whichever shape wrote it.
+
+    Rows written while a subscriber could hold only one carry a "country"
+    string. Reading it as a one-country list is the entire migration: the
+    next save writes the new key, and nobody has to be asked again for an
+    answer they already gave.
+    """
+    if record.get("countries") is not None:
+        return record["countries"]
+    single = record.get("country")
+    return [single] if single else None
+
+
 class Subscriber:
     """One reader, and everything the bot knows about them."""
 
-    __slots__ = ("chat_id", "roles", "country", "joined", "paused",
+    __slots__ = ("chat_id", "roles", "countries", "joined", "paused",
                  "seen", "muted", "applied", "saved", "sent")
 
     # A sentinel, because an empty roles list is a real state — it is what
     # someone has mid-signup, having untoggled everything — and `or` would
-    # silently replace it with the default.
+    # silently replace it with the default. Countries are the same shape and
+    # for the same reason.
     _UNSET = object()
 
-    def __init__(self, chat_id, roles=_UNSET, country=DEFAULT_COUNTRY,
+    def __init__(self, chat_id, roles=_UNSET, countries=_UNSET,
                  joined=None, paused=False, seen=None, muted=None,
                  applied=None, saved=None, sent=None):
         self.chat_id = str(chat_id)
         self.roles = ([DEFAULT_ROLE] if roles is Subscriber._UNSET
                       else list(roles or []))
-        self.country = country or DEFAULT_COUNTRY
+        # Someone in Canada usually wants the US postings too — most remote
+        # roles on these boards are US-first, and a worldwide posting names
+        # no country and qualifies under both — so this is a list, ordered
+        # as the picker presents it rather than as it was tapped.
+        self.countries = ([DEFAULT_COUNTRY] if countries is Subscriber._UNSET
+                          else list(countries or []))
         self.joined = joined or datetime.now().strftime("%Y-%m-%d")
         self.paused = bool(paused)
         # {key: "YYYY-MM-DD"} — dated so it can be pruned.
@@ -131,7 +151,7 @@ class Subscriber:
 
     # -- serialisation ------------------------------------------------------
     def as_record(self):
-        return {"roles": self.roles, "country": self.country,
+        return {"roles": self.roles, "countries": self.countries,
                 "joined": self.joined, "paused": self.paused,
                 "seen": self.seen, "sent": self.sent, "muted": self.muted,
                 "applied": self.applied, "saved": self.saved}
@@ -139,7 +159,7 @@ class Subscriber:
     @classmethod
     def from_record(cls, chat_id, data):
         d = data or {}
-        return cls(chat_id, roles=d.get("roles"), country=d.get("country"),
+        return cls(chat_id, roles=d.get("roles"), countries=countries_of(d),
                    joined=d.get("joined"), paused=d.get("paused"),
                    seen=d.get("seen"), sent=d.get("sent"),
                    muted=d.get("muted"), applied=d.get("applied"),

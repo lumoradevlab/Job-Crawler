@@ -66,30 +66,45 @@ def role_keyboard(chosen=()):
     return {"inline_keyboard": rows}
 
 
-def country_keyboard(chosen=None):
-    return {"inline_keyboard": [[
-        {"text": ("✓ " if c.code == chosen else "") + f"{c.flag} {c.name}",
-         "callback_data": f"country:{c.code}"}
-        for c in COUNTRIES.values()
-    ]]}
+def country_keyboard(chosen=()):
+    """The country picker, a toggle per country like the role picker.
+
+    Both countries at once is the common case rather than the exotic one: a
+    Canadian reader wants the US postings too, and the worldwide roles name
+    no country and qualify under both. So this is multi-select, and carries
+    the same Done button for the same reason.
+    """
+    chosen = set(chosen or ())
+    row = [{"text": ("✓ " if c.code in chosen else "") + f"{c.flag} {c.name}",
+            "callback_data": f"country:{c.code}"}
+           for c in COUNTRIES.values()]
+    return {"inline_keyboard": [row,
+                                [{"text": "Done →",
+                                  "callback_data": "country:done"}]]}
+
+
+def country_names(sub):
+    """What this reader chose, flagged and in the picker's order."""
+    return ", ".join(f"{c.flag} {c.name}" for c in COUNTRIES.values()
+                     if c.code in set(sub.countries)) or "—"
 
 
 def settings_text(sub):
     """What this subscriber currently gets, in their own words."""
-    country = COUNTRIES.get(sub.country)
     names = ", ".join(PROFILES[r].name for r in sub.roles if r in PROFILES)
     return (f"<b>Your feed</b>\n\n"
             f"Roles: {names or '—'}\n"
-            f"Where: {country.flag} {country.name}\n"
+            f"Where: {country_names(sub)}\n"
             f"{'⏸ Paused' if sub.paused else '▶️ Active'}"
             f" · since {sub.joined}\n\n"
             f"Tap to change:")
 
 
 def confirmation(sub):
-    country = COUNTRIES.get(sub.country)
+    where = " and ".join(COUNTRIES[c].name for c in COUNTRIES
+                         if c in set(sub.countries))
     names = ", ".join(PROFILES[r].name for r in sub.roles if r in PROFILES)
-    return (f"<b>Set.</b> {names} roles, remote in {country.name}.\n\n"
+    return (f"<b>Set.</b> {names} roles, remote in {where}.\n\n"
             f"First batch at the next run — twice a day, morning and "
             f"evening.\n\n"
             f"/settings to change · /help for everything else")
