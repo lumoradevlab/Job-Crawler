@@ -12,7 +12,9 @@ so a crash loses a re-read rather than a tap.
 
 import argparse
 import os
+import signal
 import sys
+import time
 from datetime import datetime
 
 from ..filters.countries import COUNTRIES, country_codes
@@ -52,10 +54,35 @@ def parser():
                    help="read and answer messages, then stop — no crawl. "
                         "For running between the scheduled crawls so /start "
                         "is answered sooner than twice a day")
+    p.add_argument("--watch", action="store_true",
+                   help="stay running: answer messages every --poll seconds "
+                        "and crawl at each --at time. One process owns the "
+                        "subscriber file, so this replaces a cron entry "
+                        "rather than sitting beside one")
+    p.add_argument("--poll", type=float, default=10.0, metavar="SECONDS",
+                   help="seconds between checks for new messages under "
+                        "--watch (default 10)")
+    p.add_argument("--at", nargs="+", default=["01:00", "13:00"],
+                   type=clock_time, metavar="HH:MM",
+                   help="when to crawl under --watch, local time to this "
+                        "machine (default 01:00 13:00)")
     p.add_argument("--dry-run", action="store_true",
                    help="crawl and report what each subscriber would get")
     p.add_argument("-q", "--quiet", action="store_true")
     return p
+
+
+def clock_time(text):
+    """An HH:MM argument, rejected at parse time rather than at midnight.
+
+    A malformed --at would otherwise compare as an ordinary string and simply
+    never come round, which is a schedule that looks set and is not.
+    """
+    try:
+        return datetime.strptime(text.strip(), "%H:%M").strftime("%H:%M")
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a time of day; use HH:MM, as in 13:00")
 
 
 def countries_to_crawl(active, allowed):
@@ -148,6 +175,135 @@ def read_updates(bot, subs, report, today=None):
     return handled
 
 
+def crawl_and_send(bot, subs, args, report):
+    """One full round: crawl each wanted country, send everyone their feed."""
+    active = subs.active()
+    if not active:
+        report.result("no active subscribers — nothing to crawl for")
+        return 0
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    wanted = countries_to_crawl(active, args.country)
+    sent_total = 0
+    # --max-messages is a budget per subscriber per run, not per country. A
+    # reader who asked for both would otherwise get twice the flood the cap
+    # exists to prevent; the remainder still arrives, as the digest.
+    spent = {}
+
+    for code in wanted:
+        jobs, cfg = crawl_country(code, args.source, args.days, args.pages,
+                                  report, args.delay)
+        sent_total += send_round(bot, subs, subscribers_for(active, code),
+                                 jobs, COUNTRIES[code], today,
+                                 args.max_messages, spent, report,
+                                 args.dry_run)
+        # Saved per country rather than once at the end. A crawl is minutes
+        # long, and a stop or a crash inside it would otherwise discard the
+        # record of everything already delivered — which Telegram cannot
+        # take back, so those postings would simply arrive again.
+        if not args.dry_run:
+            subs.save()
+
+    if not args.dry_run:
+        subs.save()
+    report.result(f"\n{sent_total} message{'' if sent_total == 1 else 's'} "
+                  f"to {len(active)} subscriber"
+                  f"{'' if len(active) == 1 else 's'}")
+    return 0
+
+
+class Schedule:
+    """The clock the daemon crawls on, and what has already gone out.
+
+    A time that had already passed when the daemon started counts as done.
+    Otherwise a restart at 14:00 would re-send the 13:00 batch, and a process
+    that crashes and restarts in a loop would send it once per crash — the
+    seen list would suppress the postings, but the run is minutes of crawling
+    each time, and a slot that fires on restart is a slot nobody can predict.
+    """
+
+    def __init__(self, times, now=None):
+        self.times = sorted(set(times))
+        self.fired = {}
+        now = now or datetime.now()
+        for t in self.times:
+            if now.strftime("%H:%M") >= t:
+                self.fired[t] = now.strftime("%Y-%m-%d")
+
+    def due(self, now):
+        """The slots that have come round since the last call, and marks them.
+
+        Marking here rather than after the crawl is deliberate: a crawl that
+        raises must not leave its slot armed, or the next tick ten seconds
+        later starts it again, and again, for the rest of the day.
+        """
+        today, clock = now.strftime("%Y-%m-%d"), now.strftime("%H:%M")
+        out = []
+        for t in self.times:
+            if clock >= t and self.fired.get(t) != today:
+                self.fired[t] = today
+                out.append(t)
+        return out
+
+
+def watch(bot, subs, args, report, crawl=crawl_and_send, schedule=None,
+          sleep=time.sleep, clock=datetime.now, stop=None):
+    """Answer Telegram continuously, and crawl when a slot comes round.
+
+    One process owns the subscriber file. A separate cron entry for the crawl
+    would be the obvious alternative and is wrong: both halves write the same
+    file, so two processes would overwrite each other's taps and re-send jobs
+    the other had already marked seen.
+
+    Polling every few seconds is what makes a signup feel immediate, and it
+    is cheap — an empty getUpdates is a few hundred bytes, and Telegram's
+    limits are far above this.
+    """
+    schedule = schedule if schedule is not None else Schedule(args.at,
+                                                              clock())
+    stop = stop or (lambda: False)
+    report.line(f"watching · polling every {args.poll}s · "
+                f"crawling at {', '.join(schedule.times)}")
+    while not stop():
+        try:
+            handled = read_updates(bot, subs, report)
+            if handled:
+                report.line(f"{handled} message"
+                            f"{'' if handled == 1 else 's'} answered")
+            subs.save()
+            for slot in schedule.due(clock()):
+                report.line(f"— {slot} crawl —")
+                crawl(bot, subs, args, report)
+        except Exception as e:
+            # A daemon outlives one bad tick. Telegram goes away, a board
+            # times out, a crawl raises — none of that is worth losing the
+            # process and every signup that arrives while it is down.
+            report.warn(f"  ! tick failed: {e}")
+        sleep(args.poll)
+    return 0
+
+
+def watch_forever(bot, subs, args, report):
+    """--watch, with the shutdown a service manager expects.
+
+    systemd stops a unit with SIGTERM and kills it nine seconds later. The
+    flag is read between ticks rather than mid-crawl, so a stop lands on a
+    saved subscriber file instead of halfway through one.
+    """
+    stopping = []
+    def asked_to_stop(_signum, _frame):
+        if not stopping:
+            report.line("\nstopping after this tick")
+        stopping.append(True)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, asked_to_stop)
+    rc = watch(bot, subs, args, report, stop=lambda: bool(stopping))
+    subs.save()
+    report.result("stopped")
+    return rc
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
     load_env_file()
@@ -171,6 +327,9 @@ def main(argv=None):
     report.line(f"telegram: @{who} · {len(subs)} subscriber"
                 f"{'' if len(subs) == 1 else 's'} (token {redact(token)})")
 
+    if args.watch:
+        return watch_forever(bot, subs, args, report)
+
     # Before the crawl: someone who typed /start this morning should be in
     # this morning's send, and a company muted this morning should not be.
     handled = read_updates(bot, subs, report)
@@ -181,33 +340,7 @@ def main(argv=None):
     if args.updates_only:
         return 0
 
-    active = subs.active()
-    if not active:
-        report.result("no active subscribers — nothing to crawl for")
-        return 0
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    wanted = countries_to_crawl(active, args.country)
-    sent_total = 0
-    # --max-messages is a budget per subscriber per run, not per country. A
-    # reader who asked for both would otherwise get twice the flood the cap
-    # exists to prevent; the remainder still arrives, as the digest.
-    spent = {}
-
-    for code in wanted:
-        jobs, cfg = crawl_country(code, args.source, args.days, args.pages,
-                                  report, args.delay)
-        sent_total += send_round(bot, subs, subscribers_for(active, code),
-                                 jobs, COUNTRIES[code], today,
-                                 args.max_messages, spent, report,
-                                 args.dry_run)
-
-    if not args.dry_run:
-        subs.save()
-    report.result(f"\n{sent_total} message{'' if sent_total == 1 else 's'} "
-                  f"to {len(active)} subscriber"
-                  f"{'' if len(active) == 1 else 's'}")
-    return 0
+    return crawl_and_send(bot, subs, args, report)
 
 
 if __name__ == "__main__":

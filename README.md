@@ -196,31 +196,72 @@ one summary with links. Nothing is lost and nothing floods. `--no-digest`
 restores the older behaviour of refusing outright, which is still the right
 answer for the case the cap was written for: a lost state file.
 
-### On a schedule
+## Opening it to other people
 
-`.github/workflows/telegram-bot.yml` runs it twice daily on GitHub Actions,
-free, whether or not your machine is on. Set four repository secrets under
-**Settings → Secrets and variables → Actions**:
+`jobcrawler-serve` is the same crawler with many readers instead of one.
+Each subscriber keeps their own roles, countries, seen list and history, and
+the crawl is shared: a run costs one crawl per country, not one per person,
+so a hundred readers cost what one does.
 
-`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ADZUNA_APP_ID`, `ADZUNA_APP_KEY`.
+```bash
+jobcrawler-serve --updates-only   # answer messages, no crawl
+jobcrawler-serve --dry-run        # crawl and report, send nothing
+jobcrawler-serve --watch          # the service: both, continuously
+```
 
-The workflow caches `<out>_seen.json` between runs. Without that an Actions
-runner starts empty every time, every posting looks new, and the same jobs
-arrive twice a day forever.
+Someone joins by pressing Start. Two questions follow, both buttons: what do
+you build (the seventeen role profiles) and where can you work. Countries are
+a multi-select — most remote roles on these boards are US-first, so a
+Canadian reader usually wants both, and a worldwide posting names no country
+and qualifies under either. `/settings` reopens the same pickers.
 
-It crawls both countries, each with its own state file — sharing one would
-mean whichever ran first suppressed every worldwide posting for the second.
-Both feeds land in the same chat, so each message carries a 🇺🇸 or 🇨🇦: the
-location usually gives the country away, but a worldwide posting names none
-and qualifies under both.
+Everything a reader has said lives in `subscribers.json`. It holds no names,
+no usernames and no message text: a stranger's job search on someone else's
+infrastructure is that person's responsibility, and the cheapest way to hold
+it responsibly is to hold almost none of it.
+
+### Running it as a service
+
+It has to be a service rather than a cron entry, for a reason that is not
+obvious: **Telegram discards an update nobody has collected after 24 hours**.
+A schedule that runs twice a day is a bot that loses signups, and GitHub's
+cron is delayed by hours often enough that a fifteen-minute schedule there
+never fires at all. Someone presses Start, nothing answers, and they leave.
+
+So one process stays up, answers within seconds, and crawls on its own
+clock. The crawl is *inside* that process deliberately — both halves write
+`subscribers.json`, and two writers lose taps and re-send jobs.
+
+```bash
+git clone https://github.com/lumoradevlab/Job-Crawler.git
+sudo ./deploy/install.sh
+sudo nano /opt/jobcrawler/.env          # TELEGRAM_BOT_TOKEN=...
+sudo systemctl enable --now jobcrawler-bot
+journalctl -u jobcrawler-bot -f
+```
+
+`deploy/jobcrawler-bot.service` polls every ten seconds and crawls at 09:00
+and 21:00 local time; `--poll` and `--at` change both. It restarts on
+failure, because a process that is down is signups that expire.
+
+The subscriber file lives in `/var/lib/jobcrawler`, outside the checkout, so
+upgrading the code cannot touch it. **Back it up.** It is the only thing on
+the box that cannot be rebuilt from this repo, and losing it means every
+reader silently stops hearing from a bot they never unsubscribed from.
+
+> There is no GitHub Actions workflow for the bot any more. Only one process
+> may call `getUpdates` for a given token — a second one steals updates from
+> the first — so the service and a workflow cannot both run. The `tests`
+> workflow is unaffected.
 
 ### Credentials
 
 Read from the environment, or from a git-ignored `.env`. Never from a
 committed file — see `.env.example` for every variable and where each key
-comes from. The real environment always wins over `.env`, so CI secrets
-cannot be shadowed by a stray file in a checkout, and the token is redacted
-in logs because an Actions log on a public repo is public.
+comes from. The real environment always wins over `.env`, so a value set by
+the service manager cannot be shadowed by a stray file in a checkout, and
+the token is redacted in logs, which on a server means the journal and in CI
+means a public log.
 
 ## Sources
 
@@ -477,6 +518,16 @@ python3 crawler.py -k "Kotlin Developer" "Compose Developer" \
 | `--no-digest` | over the cap, refuse to send rather than summarising |
 | `--newest` | over the cap, send the newest N and mark the rest seen |
 | `--no-buttons` | plain messages, and do not read taps |
+
+Multi-user only, on `jobcrawler-serve`:
+
+| flag | meaning |
+|---|---|
+| `--watch` | stay up: answer messages every `--poll` seconds, crawl at each `--at` |
+| `--poll` | seconds between message checks under `--watch` (default 10) |
+| `--at` | when to crawl under `--watch`, `HH:MM` local time (default 01:00 13:00) |
+| `--updates-only` | answer messages and stop, without crawling |
+| `--subscribers` | where the subscriber file lives (default `subscribers.json`) |
 
 ## Tests
 
