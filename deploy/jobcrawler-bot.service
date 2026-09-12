@@ -1,0 +1,56 @@
+# The bot, as a service. One process answers Telegram continuously and
+# crawls on its own schedule — see --watch for why the crawl is not a
+# separate timer: both halves write the subscriber file, and two writers
+# lose taps and re-send jobs.
+#
+#   sudo cp deploy/jobcrawler-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now jobcrawler-bot
+#   journalctl -u jobcrawler-bot -f
+
+[Unit]
+Description=Remote job crawler Telegram bot
+Documentation=https://github.com/lumoradevlab/Job-Crawler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jobcrawler
+Group=jobcrawler
+WorkingDirectory=/opt/jobcrawler
+# Credentials live here, readable only by the service user. The unit never
+# carries the token itself: a systemd unit is world-readable by default.
+EnvironmentFile=/opt/jobcrawler/.env
+ExecStart=/opt/jobcrawler/venv/bin/jobcrawler-serve \
+    --watch \
+    --poll 10 \
+    --at 09:00 --at 21:00 \
+    --subscribers /var/lib/jobcrawler/subscribers.json
+
+# A crash must not cost signups: Telegram drops an unread update after 24
+# hours, so time spent dead is members lost for good.
+Restart=always
+RestartSec=10s
+# The stop flag is read between ticks and a tick can be a full crawl, which
+# is minutes per country. Long enough to let one finish; the crawl saves
+# after each country, so a kill at the deadline costs one country's record
+# rather than the run's.
+TimeoutStopSec=600
+
+# It needs the network, its state directory and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/jobcrawler
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
