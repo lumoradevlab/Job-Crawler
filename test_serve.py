@@ -10,6 +10,7 @@ calls, so nothing reaches api.telegram.org.
 Stdlib only, like the crawler itself.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -79,9 +80,15 @@ class StubBot:
         return [t for cid, t, _ in self.sent if cid == str(chat_id)]
 
 
+# Not builtin hash(): it is salted per process, so two titles in one test
+# could share a URL on one run in thirty and not on the next — and a shared
+# URL is one seen key for two jobs, which fails whatever the code does. The
+# digest tap_id already uses is stable across runs and wide enough not to
+# collide.
 def job(title="Backend Engineer", company="Acme", url=None, **over):
+    slug = hashlib.sha1(title.encode("utf-8")).hexdigest()[:12]
     return c.row("greenhouse", title, company, over.pop("location", "Remote - US"),
-                 url or f"https://x.example/{abs(hash(title)) % 9999}",
+                 url or f"https://x.example/{slug}",
                  over.pop("posted", "2026-09-12"), **over)
 
 
