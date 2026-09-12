@@ -10,6 +10,7 @@ calls, so nothing reaches api.telegram.org.
 Stdlib only, like the crawler itself.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -18,7 +19,8 @@ import unittest
 
 import jobcrawler as c
 from jobcrawler.filters.countries import CA, US
-from jobcrawler.notify import actions, fanout, router, usertaps
+from jobcrawler.notify import (actions, fanout, onboarding, router,
+                                serve, usertaps)
 from jobcrawler.notify.subscribers import (SEEN_TTL_DAYS, Subscriber,
                                            Subscribers, seen_key)
 from jobcrawler.notify.telegram import Blocked
@@ -78,9 +80,15 @@ class StubBot:
         return [t for cid, t, _ in self.sent if cid == str(chat_id)]
 
 
+# Not builtin hash(): it is salted per process, so two titles in one test
+# could share a URL on one run in thirty and not on the next — and a shared
+# URL is one seen key for two jobs, which fails whatever the code does. The
+# digest tap_id already uses is stable across runs and wide enough not to
+# collide.
 def job(title="Backend Engineer", company="Acme", url=None, **over):
+    slug = hashlib.sha1(title.encode("utf-8")).hexdigest()[:12]
     return c.row("greenhouse", title, company, over.pop("location", "Remote - US"),
-                 url or f"https://x.example/{abs(hash(title)) % 9999}",
+                 url or f"https://x.example/{slug}",
                  over.pop("posted", "2026-09-12"), **over)
 
 
@@ -98,11 +106,29 @@ class TestSubscribers(unittest.TestCase):
 
     def test_a_subscriber_survives_a_round_trip(self):
         s = Subscribers(self.path)
-        s.add("123", roles=["backend", "devops"], country="ca")
+        s.add("123", roles=["backend", "devops"], countries=["us", "ca"])
         s.save()
         back = Subscribers(self.path).load().get("123")
         self.assertEqual(back.roles, ["backend", "devops"])
-        self.assertEqual(back.country, "ca")
+        self.assertEqual(back.countries, ["us", "ca"])
+
+    def test_a_row_written_before_multi_country_still_loads(self):
+        # The old shape: one "country" string. Nobody should be asked again
+        # for an answer they already gave.
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump({"123": {"roles": ["backend"], "country": "ca"}}, fh)
+        self.assertEqual(Subscribers(self.path).load().get("123").countries,
+                         ["ca"])
+
+    def test_the_old_shape_is_rewritten_on_the_next_save(self):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump({"123": {"roles": ["backend"], "country": "ca"}}, fh)
+        s = Subscribers(self.path).load()
+        s.save()
+        with open(self.path, encoding="utf-8") as fh:
+            record = json.load(fh)["123"]
+        self.assertEqual(record["countries"], ["ca"])
+        self.assertNotIn("country", record)
 
     def test_adding_twice_does_not_reset_what_they_chose(self):
         # /start is a button people press twice.
@@ -194,16 +220,47 @@ class TestOnboarding(unittest.TestCase):
         router.handle_setup(self.bot, self.subs, "1", "role:done", "cb")
         self.assertIn("Where can you work", self.bot.texts_to("1")[0])
 
-    def test_choosing_a_country_confirms_the_whole_setup(self):
-        self.subs.add("1", roles=["backend"])
-        router.handle_setup(self.bot, self.subs, "1", "country:ca")
-        self.assertEqual(self.subs.get("1").country, "ca")
+    def test_the_country_picker_offers_a_way_to_finish(self):
+        # Multi-select has no other way out: without Done a reader taps the
+        # countries they want and is then stranded mid-signup.
+        rows = onboarding.country_keyboard(["us"])["inline_keyboard"]
+        taps = [b["callback_data"] for row in rows for b in row]
+        self.assertIn("country:done", taps)
+
+    def test_done_confirms_the_whole_setup(self):
+        self.subs.add("1", roles=["backend"], countries=["ca"])
+        router.handle_setup(self.bot, self.subs, "1", "country:done", "cb")
         self.assertIn("Set.", self.bot.texts_to("1")[0])
+        self.assertIn("Canada", self.bot.texts_to("1")[0])
+
+    def test_both_countries_can_be_held_at_once(self):
+        # The whole point: a Canadian reader wants the US postings too.
+        self.subs.add("1", roles=["backend"], countries=[])
+        router.handle_setup(self.bot, self.subs, "1", "country:us")
+        router.handle_setup(self.bot, self.subs, "1", "country:ca")
+        self.assertEqual(set(self.subs.get("1").countries), {"us", "ca"})
+
+    def test_the_confirmation_names_both(self):
+        self.subs.add("1", roles=["backend"], countries=["us", "ca"])
+        router.handle_setup(self.bot, self.subs, "1", "country:done", "cb")
+        said = self.bot.texts_to("1")[0]
+        self.assertIn("United States and Canada", said)
+
+    def test_tapping_a_chosen_country_again_removes_it(self):
+        self.subs.add("1", roles=["backend"], countries=["us", "ca"])
+        router.handle_setup(self.bot, self.subs, "1", "country:us")
+        self.assertEqual(self.subs.get("1").countries, ["ca"])
+
+    def test_done_with_no_country_says_so_rather_than_proceeding(self):
+        self.subs.add("1", roles=["backend"], countries=[])
+        router.handle_setup(self.bot, self.subs, "1", "country:done", "cb")
+        self.assertIn("Pick at least one", self.bot.toasts[0])
+        self.assertEqual(self.bot.texts_to("1"), [])
 
     def test_choosing_a_country_ticks_it(self):
         # The choice saved and the tick did not appear, so tapping again
         # looked like nothing happening — twice.
-        self.subs.add("1", roles=["backend"])
+        self.subs.add("1", roles=["backend"], countries=[])
         self.bot.last_message_id["1"] = 42
         router.handle_setup(self.bot, self.subs, "1", "country:ca")
         self.assertTrue(self.bot.edits, "the keyboard was never redrawn")
@@ -212,16 +269,16 @@ class TestOnboarding(unittest.TestCase):
         self.assertTrue(any(l.startswith("✓") and "Canada" in l for l in labels),
                         labels)
 
-    def test_changing_the_country_moves_the_tick(self):
-        self.subs.add("1", roles=["backend"], country="ca")
+    def test_adding_the_second_country_leaves_the_first_ticked(self):
+        self.subs.add("1", roles=["backend"], countries=["ca"])
         self.bot.last_message_id["1"] = 42
         router.handle_setup(self.bot, self.subs, "1", "country:us")
         labels = [b["text"] for row in self.bot.edits[-1][2]["inline_keyboard"]
                   for b in row]
         self.assertTrue(any(l.startswith("✓") and "United States" in l
                             for l in labels), labels)
-        self.assertFalse(any(l.startswith("✓") and "Canada" in l
-                             for l in labels), labels)
+        self.assertTrue(any(l.startswith("✓") and "Canada" in l
+                            for l in labels), labels)
 
     def test_stop_deletes_everything_about_them(self):
         self.subs.add("1")
@@ -356,6 +413,138 @@ class TestFanout(unittest.TestCase):
 # ==========================================================================
 # A tap belongs to the person who made it
 # ==========================================================================
+class TestCountrySelection(unittest.TestCase):
+    """Which crawls a run does, and who each one is sent to."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.subs = Subscribers(os.path.join(self.dir, "s.json"))
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_one_country_each_is_crawled_once(self):
+        self.subs.add("1", countries=["us"])
+        self.subs.add("2", countries=["ca"])
+        self.assertEqual(
+            serve.countries_to_crawl(self.subs.active(), ["us", "ca"]),
+            ["ca", "us"])
+
+    def test_a_country_nobody_asked_for_is_not_crawled(self):
+        # The crawl is the expensive half — four minutes a country.
+        self.subs.add("1", countries=["us"])
+        self.assertEqual(
+            serve.countries_to_crawl(self.subs.active(), ["us", "ca"]), ["us"])
+
+    def test_both_countries_from_one_subscriber_crawl_both(self):
+        self.subs.add("1", countries=["us", "ca"])
+        self.assertEqual(
+            serve.countries_to_crawl(self.subs.active(), ["us", "ca"]),
+            ["ca", "us"])
+
+    def test_the_flag_still_limits_what_is_crawled(self):
+        self.subs.add("1", countries=["us", "ca"])
+        self.assertEqual(
+            serve.countries_to_crawl(self.subs.active(), ["us"]), ["us"])
+
+    def test_a_paused_subscriber_does_not_cause_a_crawl(self):
+        self.subs.add("1", countries=["ca"], paused=True)
+        self.assertEqual(serve.countries_to_crawl(self.subs.active(),
+                                                  ["us", "ca"]), [])
+
+    def test_someone_who_chose_both_is_sent_both(self):
+        both = self.subs.add("1", countries=["us", "ca"])
+        just_us = self.subs.add("2", countries=["us"])
+        active = self.subs.active()
+        self.assertEqual(serve.subscribers_for(active, "us"), [both, just_us])
+        self.assertEqual(serve.subscribers_for(active, "ca"), [both])
+
+
+class TestSharedBudget(unittest.TestCase):
+    """--max-messages is per subscriber per run, not per country."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.subs = Subscribers(os.path.join(self.dir, "s.json"))
+        self.bot = StubBot()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_a_spent_budget_sends_the_rest_as_one_summary(self):
+        sub = self.subs.add("1", roles=["backend"])
+        jobs = [job("Backend Engineer %d" % i) for i in range(3)]
+        sent = fanout.deliver(self.bot, self.subs, sub, jobs, US,
+                              "2026-09-12", 0, c.NullReporter())
+        self.assertEqual(sent, 0)
+        self.assertEqual(len(self.bot.texts_to("1")), 1)
+
+    def test_the_summary_does_not_claim_messages_that_are_not_there(self):
+        sub = self.subs.add("1", roles=["backend"])
+        jobs = [job("Backend Engineer %d" % i) for i in range(3)]
+        fanout.deliver(self.bot, self.subs, sub, jobs, US, "2026-09-12", 0,
+                       c.NullReporter())
+        self.assertNotIn("newest 0", self.bot.texts_to("1")[0])
+
+    def test_the_budget_spans_the_countries_rather_than_resetting(self):
+        # A reader who asked for both must not get twice the flood the cap
+        # exists to prevent, so the second country inherits what is left.
+        sub = self.subs.add("1", roles=["backend"], countries=["us", "ca"])
+        spent = {}
+        report = c.NullReporter()
+        first = [job("Backend Engineer US %d" % i) for i in range(2)]
+        serve.send_round(self.bot, self.subs, [sub], first, US, "2026-09-12",
+                         2, spent, report)
+        self.assertEqual(spent["1"], 2)
+
+        second = [job("Backend Engineer CA %d" % i) for i in range(2)]
+        serve.send_round(self.bot, self.subs, [sub], second, CA, "2026-09-12",
+                         2, spent, report)
+        individually = [j.title for _, j in self.bot.postings]
+        self.assertEqual(len(individually), 2, individually)
+        self.assertTrue(all("US" in t for t in individually), individually)
+
+    def test_a_worldwide_posting_arrives_once_not_once_per_country(self):
+        # It names no country and so qualifies under both, turning up in
+        # each crawl. The seen list is what stops it being sent twice.
+        sub = self.subs.add("1", roles=["backend"], countries=["us", "ca"])
+        worldwide = job("Backend Engineer", location="Remote - Worldwide")
+        spent, report = {}, c.NullReporter()
+        serve.send_round(self.bot, self.subs, [sub], [worldwide], US,
+                         "2026-09-12", 10, spent, report)
+        serve.send_round(self.bot, self.subs, [sub], [worldwide], CA,
+                         "2026-09-12", 10, spent, report)
+        self.assertEqual(len(self.bot.postings), 1, self.bot.postings)
+        self.assertEqual(self.bot.texts_to("1"), [])
+
+    def test_a_reader_not_yet_in_the_ledger_gets_the_whole_limit(self):
+        # Counting upwards means an absent entry reads as "nothing spent".
+        # A remaining-budget dict would read it as "nothing left" and digest
+        # everything they were owed, silently.
+        sub = self.subs.add("1", roles=["backend"])
+        serve.send_round(self.bot, self.subs, [sub],
+                         [job("Backend Engineer")], US, "2026-09-12",
+                         5, {}, c.NullReporter())
+        self.assertEqual(len(self.bot.postings), 1)
+        self.assertEqual(self.bot.texts_to("1"), [])
+
+    def test_the_second_country_still_arrives_as_a_summary(self):
+        sub = self.subs.add("1", roles=["backend"], countries=["us", "ca"])
+        serve.send_round(self.bot, self.subs, [sub],
+                         [job("Backend Engineer CA")], CA, "2026-09-12",
+                         2, {"1": 2}, c.NullReporter())
+        self.assertEqual(len(self.bot.texts_to("1")), 1)
+        self.assertIn("Backend Engineer CA", self.bot.texts_to("1")[0])
+
+    def test_everything_is_still_marked_seen_when_the_budget_is_spent(self):
+        # Otherwise the second country's digest arrives again tomorrow.
+        sub = self.subs.add("1", roles=["backend"])
+        jobs = [job("Backend Engineer %d" % i) for i in range(3)]
+        fanout.deliver(self.bot, self.subs, sub, jobs, US, "2026-09-12", 0,
+                       c.NullReporter())
+        self.assertTrue(all(sub.has_seen(j.url) for j in jobs))
+
+
 class TestPerUserTaps(unittest.TestCase):
     """The same button means different things to different readers.
 

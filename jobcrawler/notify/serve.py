@@ -58,6 +58,49 @@ def parser():
     return p
 
 
+def countries_to_crawl(active, allowed):
+    """Every country at least one active subscriber asked for.
+
+    A union, not a partition: someone who chose both appears under each, and
+    the crawl for a country is shared by everyone who wants it.
+    """
+    return sorted({c for s in active for c in s.countries} & set(allowed))
+
+
+def subscribers_for(active, code):
+    """Everyone who asked for this country, alongside another or not."""
+    return [s for s in active if code in s.countries]
+
+
+def send_round(bot, subs, people, jobs, country, today, limit, spent, report,
+               dry_run=False):
+    """One country's crawl, filtered and sent to each person who wanted it.
+
+    `limit` is --max-messages and `spent` counts what each reader has already
+    had this run, so someone who asked for both countries is capped once
+    rather than once per country. It counts upwards rather than down because
+    a missing entry then means "nothing yet" — a remaining-budget dict would
+    read an absent reader as one with nothing left, and silently digest
+    everything they were owed.
+    """
+    sent_total = 0
+    for sub in people:
+        batch = for_subscriber(sub, jobs, today)
+        if not batch:
+            report.line(f"  {sub.chat_id}: nothing new")
+            continue
+        if dry_run:
+            report.result(f"  {sub.chat_id}: would send {len(batch)} "
+                          f"({', '.join(sub.roles)})")
+            continue
+        left = max(0, limit - spent.get(sub.chat_id, 0))
+        n = deliver(bot, subs, sub, batch, country, today, left, report)
+        spent[sub.chat_id] = spent.get(sub.chat_id, 0) + n
+        sent_total += n
+        report.line(f"  {sub.chat_id}: sent {n} of {len(batch)}")
+    return sent_total
+
+
 def read_updates(bot, subs, report, today=None):
     """Answer everything people have typed or tapped since the last run."""
     today = today or datetime.now().strftime("%Y-%m-%d")
@@ -144,26 +187,20 @@ def main(argv=None):
         return 0
 
     today = datetime.now().strftime("%Y-%m-%d")
-    wanted = {s.country for s in active} & set(args.country)
+    wanted = countries_to_crawl(active, args.country)
     sent_total = 0
+    # --max-messages is a budget per subscriber per run, not per country. A
+    # reader who asked for both would otherwise get twice the flood the cap
+    # exists to prevent; the remainder still arrives, as the digest.
+    spent = {}
 
-    for code in sorted(wanted):
+    for code in wanted:
         jobs, cfg = crawl_country(code, args.source, args.days, args.pages,
                                   report, args.delay)
-        country = COUNTRIES[code]
-        for sub in [s for s in active if s.country == code]:
-            batch = for_subscriber(sub, jobs, today)
-            if not batch:
-                report.line(f"  {sub.chat_id}: nothing new")
-                continue
-            if args.dry_run:
-                report.result(f"  {sub.chat_id}: would send {len(batch)} "
-                              f"({', '.join(sub.roles)})")
-                continue
-            n = deliver(bot, subs, sub, batch, country, today,
-                        args.max_messages, report)
-            sent_total += n
-            report.line(f"  {sub.chat_id}: sent {n} of {len(batch)}")
+        sent_total += send_round(bot, subs, subscribers_for(active, code),
+                                 jobs, COUNTRIES[code], today,
+                                 args.max_messages, spent, report,
+                                 args.dry_run)
 
     if not args.dry_run:
         subs.save()
