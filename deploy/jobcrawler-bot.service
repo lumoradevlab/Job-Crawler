@@ -22,6 +22,12 @@ WorkingDirectory=/opt/jobcrawler
 # Credentials live here, readable only by the service user. The unit never
 # carries the token itself: a systemd unit is world-readable by default.
 EnvironmentFile=/opt/jobcrawler/.env
+# Without this the journal stays empty until the process dies. Python
+# buffers stdout when it is a pipe rather than a terminal, and under
+# systemd it is always a pipe — so every line the bot prints sits in a
+# 8KB buffer for hours, and a service you cannot read is a service you
+# cannot diagnose.
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/jobcrawler/venv/bin/jobcrawler-serve \
     --watch \
     --poll 10 \
