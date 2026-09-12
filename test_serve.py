@@ -10,12 +10,15 @@ calls, so nothing reaches api.telegram.org.
 Stdlib only, like the crawler itself.
 """
 
+import argparse
 import hashlib
+import io
 import json
 import os
 import shutil
 import tempfile
 import unittest
+from datetime import datetime
 
 import jobcrawler as c
 from jobcrawler.filters.countries import CA, US
@@ -39,6 +42,22 @@ class StubBot:
         self.restored = []
         self.marked = []
         self.blocked = set(str(b) for b in blocked)
+        self.queued = []
+        self.acknowledged = []
+        # Ticks to fail with something read_updates does not catch, so the
+        # daemon's own guard is what is under test rather than the handled
+        # TelegramError path.
+        self.fail_updates = 0
+
+    def updates(self, offset=None, limit=100):
+        if self.fail_updates:
+            self.fail_updates -= 1
+            raise RuntimeError("connection reset by peer")
+        batch, self.queued = self.queued, []
+        return batch
+
+    def acknowledge(self, update_id):
+        self.acknowledged.append(update_id)
 
     def send_to(self, chat_id, text, preview=False, markup=None):
         if str(chat_id) in self.blocked:
@@ -543,6 +562,153 @@ class TestSharedBudget(unittest.TestCase):
         fanout.deliver(self.bot, self.subs, sub, jobs, US, "2026-09-12", 0,
                        c.NullReporter())
         self.assertTrue(all(sub.has_seen(j.url) for j in jobs))
+
+
+class TestSchedule(unittest.TestCase):
+    """When the watching daemon decides a crawl is due."""
+
+    def at(self, hhmm):
+        return datetime.strptime("2026-09-12 " + hhmm, "%Y-%m-%d %H:%M")
+
+    def test_a_slot_fires_when_it_comes_round(self):
+        s = serve.Schedule(["13:00"], self.at("12:00"))
+        self.assertEqual(s.due(self.at("12:59")), [])
+        self.assertEqual(s.due(self.at("13:00")), ["13:00"])
+
+    def test_a_slot_fires_once_a_day_not_once_a_tick(self):
+        s = serve.Schedule(["13:00"], self.at("12:00"))
+        self.assertEqual(s.due(self.at("13:00")), ["13:00"])
+        self.assertEqual(s.due(self.at("13:00")), [])
+        self.assertEqual(s.due(self.at("18:00")), [])
+
+    def test_it_comes_round_again_the_next_day(self):
+        s = serve.Schedule(["13:00"], self.at("12:00"))
+        s.due(self.at("13:00"))
+        tomorrow = datetime.strptime("2026-09-13 13:00", "%Y-%m-%d %H:%M")
+        self.assertEqual(s.due(tomorrow), ["13:00"])
+
+    def test_a_restart_does_not_resend_a_slot_already_past(self):
+        # The daemon comes up at 14:00; 13:00 went out an hour ago. Firing
+        # it again is minutes of crawling for a batch already sent — and on
+        # a crash loop, once per crash.
+        s = serve.Schedule(["13:00"], self.at("14:00"))
+        self.assertEqual(s.due(self.at("14:00")), [])
+
+    def test_a_restart_before_the_slot_still_fires_it(self):
+        s = serve.Schedule(["13:00"], self.at("09:00"))
+        self.assertEqual(s.due(self.at("13:00")), ["13:00"])
+
+    def test_a_crawl_that_raises_does_not_leave_its_slot_armed(self):
+        # due() marks before the caller crawls, so a failure costs one batch
+        # rather than restarting the crawl every tick until midnight.
+        s = serve.Schedule(["13:00"], self.at("12:00"))
+        s.due(self.at("13:00"))
+        self.assertEqual(s.due(self.at("13:00")), [])
+
+    def test_both_slots_are_kept_and_ordered(self):
+        s = serve.Schedule(["13:00", "01:00"], self.at("00:30"))
+        self.assertEqual(s.times, ["01:00", "13:00"])
+
+    def test_a_malformed_time_is_rejected_when_it_is_typed(self):
+        # Not at midnight, when it silently fails to come round.
+        for bad in ("25:00", "1pm", "13.00", ""):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                serve.clock_time(bad)
+        self.assertEqual(serve.clock_time(" 13:00 "), "13:00")
+
+
+class TestWatch(unittest.TestCase):
+    """The daemon loop: answer continuously, crawl on the slot."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.subs = Subscribers(os.path.join(self.dir, "s.json"))
+        self.bot = StubBot()
+        self.args = serve.parser().parse_args(["--watch", "--poll", "0"])
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def run_ticks(self, n, schedule=None, clock=None, crawl=None):
+        """Run the loop for exactly n ticks."""
+        ticks = []
+        def stop():
+            ticks.append(1)
+            return len(ticks) > n
+        serve.watch(self.bot, self.subs, self.args, c.NullReporter(),
+                    crawl=crawl or (lambda *a: 0),
+                    schedule=schedule or serve.Schedule([], datetime.now()),
+                    sleep=lambda _s: None,
+                    clock=clock or datetime.now, stop=stop)
+        return len(ticks) - 1
+
+    def test_it_answers_a_start_without_waiting_for_a_crawl(self):
+        # The whole point: a signup is answered in seconds, not at 13:00.
+        self.bot.queued = [{"update_id": 1, "message": {
+            "chat": {"id": 7}, "text": "/start"}}]
+        self.run_ticks(1)
+        self.assertIsNotNone(self.subs.get("7"))
+        self.assertTrue(self.bot.texts_to("7"))
+
+    def test_it_saves_after_each_tick_so_a_kill_loses_nothing(self):
+        self.bot.queued = [{"update_id": 1, "message": {
+            "chat": {"id": 7}, "text": "/start"}}]
+        self.run_ticks(1)
+        self.assertIsNotNone(
+            Subscribers(self.subs.path).load().get("7"))
+
+    def test_the_crawl_runs_when_its_slot_comes_round(self):
+        ran = []
+        clock = iter([datetime.strptime("2026-09-12 12:59", "%Y-%m-%d %H:%M"),
+                      datetime.strptime("2026-09-12 13:00", "%Y-%m-%d %H:%M")])
+        schedule = serve.Schedule(
+            ["13:00"], datetime.strptime("2026-09-12 12:00", "%Y-%m-%d %H:%M"))
+        self.run_ticks(2, schedule=schedule, clock=lambda: next(clock),
+                       crawl=lambda *a: ran.append(1))
+        self.assertEqual(len(ran), 1)
+
+    def test_a_crawl_saves_each_country_as_it_goes(self):
+        # A stop or a crash mid-crawl must not discard what was already
+        # delivered: Telegram cannot take those messages back, so an
+        # unsaved record means they arrive a second time.
+        self.subs.add("1", roles=["backend"], countries=["us", "ca"])
+        args = serve.parser().parse_args(["--max-messages", "5"])
+        report = c.NullReporter()
+        report.stream = io.StringIO()
+
+        saves, real_save = [], self.subs.save
+
+        def counting_save():
+            saves.append(1)
+            real_save()
+
+        self.subs.save = counting_save
+        # Only the sending half is under test; the crawl itself is the slow
+        # part and has its own tests.
+        original = serve.crawl_country
+        serve.crawl_country = lambda code, *a, **k: (
+            [job(f"Backend Engineer {code}")], None)
+        try:
+            serve.crawl_and_send(self.bot, self.subs, args, report)
+        finally:
+            serve.crawl_country = original
+        self.assertEqual(len(saves), 3, "one per country, plus the final one")
+
+    def test_a_failing_tick_does_not_kill_the_daemon(self):
+        # Telegram goes away for a minute. Every signup that arrives while
+        # the process is dead is lost, so it must not die.
+        self.bot.fail_updates = 1
+        self.assertEqual(self.run_ticks(2), 2)
+
+    def test_a_crawl_that_raises_does_not_kill_the_daemon(self):
+        def boom(*_a):
+            raise RuntimeError("a board fell over")
+        clock = datetime.strptime("2026-09-12 13:00", "%Y-%m-%d %H:%M")
+        schedule = serve.Schedule(
+            ["13:00"], datetime.strptime("2026-09-12 12:00", "%Y-%m-%d %H:%M"))
+        self.assertEqual(
+            self.run_ticks(2, schedule=schedule, clock=lambda: clock,
+                           crawl=boom), 2)
 
 
 class TestPerUserTaps(unittest.TestCase):
