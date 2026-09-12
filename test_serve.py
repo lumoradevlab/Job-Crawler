@@ -200,6 +200,29 @@ class TestOnboarding(unittest.TestCase):
         self.assertEqual(self.subs.get("1").country, "ca")
         self.assertIn("Set.", self.bot.texts_to("1")[0])
 
+    def test_choosing_a_country_ticks_it(self):
+        # The choice saved and the tick did not appear, so tapping again
+        # looked like nothing happening — twice.
+        self.subs.add("1", roles=["backend"])
+        self.bot.last_message_id["1"] = 42
+        router.handle_setup(self.bot, self.subs, "1", "country:ca")
+        self.assertTrue(self.bot.edits, "the keyboard was never redrawn")
+        labels = [b["text"] for row in self.bot.edits[-1][2]["inline_keyboard"]
+                  for b in row]
+        self.assertTrue(any(l.startswith("✓") and "Canada" in l for l in labels),
+                        labels)
+
+    def test_changing_the_country_moves_the_tick(self):
+        self.subs.add("1", roles=["backend"], country="ca")
+        self.bot.last_message_id["1"] = 42
+        router.handle_setup(self.bot, self.subs, "1", "country:us")
+        labels = [b["text"] for row in self.bot.edits[-1][2]["inline_keyboard"]
+                  for b in row]
+        self.assertTrue(any(l.startswith("✓") and "United States" in l
+                            for l in labels), labels)
+        self.assertFalse(any(l.startswith("✓") and "Canada" in l
+                             for l in labels), labels)
+
     def test_stop_deletes_everything_about_them(self):
         self.subs.add("1")
         router.handle_command(self.bot, self.subs, "1", "/stop")
