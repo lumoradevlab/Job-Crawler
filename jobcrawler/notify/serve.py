@@ -55,13 +55,15 @@ def parser():
                         "For running between the scheduled crawls so /start "
                         "is answered sooner than twice a day")
     p.add_argument("--watch", action="store_true",
-                   help="stay running: answer messages every --poll seconds "
-                        "and crawl at each --at time. One process owns the "
+                   help="stay running: answer messages as they arrive and "
+                        "crawl at each --at time. One process owns the "
                         "subscriber file, so this replaces a cron entry "
                         "rather than sitting beside one")
-    p.add_argument("--poll", type=float, default=10.0, metavar="SECONDS",
-                   help="seconds between checks for new messages under "
-                        "--watch (default 10)")
+    p.add_argument("--poll", type=float, default=30.0, metavar="SECONDS",
+                   help="how long to hold each getUpdates open under --watch "
+                        "(default 30). Telegram returns the instant someone "
+                        "types, so this is a ceiling on an idle wait, not a "
+                        "delay before a reply")
     p.add_argument("--at", nargs="+", default=["01:00", "13:00"],
                    type=clock_time, metavar="HH:MM",
                    help="when to crawl under --watch, local time to this "
@@ -128,11 +130,17 @@ def send_round(bot, subs, people, jobs, country, today, limit, spent, report,
     return sent_total
 
 
-def read_updates(bot, subs, report, today=None):
-    """Answer everything people have typed or tapped since the last run."""
+def read_updates(bot, subs, report, today=None, wait=0):
+    """Answer everything people have typed or tapped since the last run.
+
+    `wait` asks Telegram to hold the connection open until something
+    arrives, which is what makes a tap feel immediate — see
+    TelegramNotifier.updates. A one-shot run leaves it at zero: there is no
+    point holding a connection open for a process about to exit.
+    """
     today = today or datetime.now().strftime("%Y-%m-%d")
     try:
-        batch = bot.updates(offset=None)
+        batch = bot.updates(offset=None, wait=wait)
     except TelegramError as e:
         report.warn(f"  ! telegram: could not read updates: {e}")
         return 0
@@ -262,15 +270,19 @@ def watch(bot, subs, args, report, crawl=crawl_and_send, schedule=None,
     schedule = schedule if schedule is not None else Schedule(args.at,
                                                               clock())
     stop = stop or (lambda: False)
-    report.line(f"watching · polling every {args.poll}s · "
+    report.line(f"watching · long-poll {args.poll}s · "
                 f"crawling at {', '.join(schedule.times)}")
     while not stop():
         try:
-            handled = read_updates(bot, subs, report)
+            # The wait happens inside the request rather than after it.
+            # Telegram returns the moment someone types or taps, so a reply
+            # lands in milliseconds; with a sleep afterwards instead, every
+            # tap waited half the interval on average for nothing.
+            handled = read_updates(bot, subs, report, wait=args.poll)
             if handled:
                 report.line(f"{handled} message"
                             f"{'' if handled == 1 else 's'} answered")
-            subs.save()
+                subs.save()
             for slot in schedule.due(clock()):
                 report.line(f"— {slot} crawl —")
                 crawl(bot, subs, args, report)
@@ -279,7 +291,9 @@ def watch(bot, subs, args, report, crawl=crawl_and_send, schedule=None,
             # times out, a crawl raises — none of that is worth losing the
             # process and every signup that arrives while it is down.
             report.warn(f"  ! tick failed: {e}")
-        sleep(args.poll)
+            # Only here: a failing long poll returns at once, and a tight
+            # retry loop against a broken Telegram is a request flood.
+            sleep(min(args.poll, 5))
     return 0
 
 

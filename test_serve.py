@@ -38,6 +38,7 @@ class StubBot:
         self.edits = []
         self.toasts = []
         self.last_message_id = {}
+        self.waits = []
         self.confirmed = []
         self.restored = []
         self.marked = []
@@ -49,7 +50,8 @@ class StubBot:
         # TelegramError path.
         self.fail_updates = 0
 
-    def updates(self, offset=None, limit=100):
+    def updates(self, offset=None, limit=100, wait=0):
+        self.waits.append(wait)
         if self.fail_updates:
             self.fail_updates -= 1
             raise RuntimeError("connection reset by peer")
@@ -839,6 +841,94 @@ class TestPerUserTaps(unittest.TestCase):
         sub.seen[key] = "2026-01-01"
         sub.prune("2026-09-13")
         self.assertNotIn(key, sub.sent)
+
+
+# ==========================================================================
+# Long polling — why a tap is answered now and not in five seconds
+# ==========================================================================
+class TestLongPoll(unittest.TestCase):
+    """The wait belongs inside the request, not after it.
+
+    With timeout=0 and a sleep afterwards, every tap waited half the
+    interval on average before anything looked at it — five seconds on a
+    ten-second loop, for a round trip that takes 0.28s.
+    """
+
+    def _args(self, **over):
+        from jobcrawler.notify.serve import parser
+        argv = []
+        for k, v in over.items():
+            argv += [f"--{k.replace('_', '-')}", str(v)]
+        return parser().parse_args(argv)
+
+    def test_the_watch_loop_asks_telegram_to_hold_the_line(self):
+        from jobcrawler.notify.serve import watch
+        bot, subs = StubBot(), Subscribers("/dev/null")
+        ticks = []
+        watch(bot, subs, self._args(poll=30), c.NullReporter(),
+              crawl=lambda *a: 0, schedule=_NoSchedule(),
+              sleep=lambda s: None, stop=lambda: len(ticks) or ticks.append(1))
+        self.assertEqual(bot.waits, [30.0])
+
+    def test_a_one_shot_run_does_not_hold_anything_open(self):
+        # There is no point holding a connection for a process about to
+        # exit, and a --updates-only run is exactly that.
+        from jobcrawler.notify.serve import read_updates
+        bot = StubBot()
+        read_updates(bot, Subscribers("/dev/null"), c.NullReporter())
+        self.assertEqual(bot.waits, [0])
+
+    def test_the_socket_outlasts_the_long_poll(self):
+        # Left at 30s, a getUpdates asking Telegram to wait 60 would be
+        # killed locally every time and look like a network fault.
+        import jobcrawler.notify.telegram as tg
+        seen = {}
+
+        class FakeResp:
+            def read(self):
+                return b'{"ok":true,"result":[]}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            seen["timeout"] = timeout
+            return FakeResp()
+
+        real = tg.urllib.request.urlopen
+        tg.urllib.request.urlopen = fake_urlopen
+        try:
+            tg.TelegramNotifier("t", "1").updates(wait=60)
+        finally:
+            tg.urllib.request.urlopen = real
+        self.assertGreater(seen["timeout"], 60)
+
+    def test_a_failing_tick_still_sleeps_before_retrying(self):
+        # A long poll that fails returns at once, so a tight retry loop
+        # against a broken Telegram is a request flood.
+        from jobcrawler.notify.serve import watch
+
+        class Broken(StubBot):
+            def updates(self, offset=None, limit=100, wait=0):
+                raise RuntimeError("telegram is down")
+
+        slept, ticks = [], []
+        watch(Broken(), Subscribers("/dev/null"), self._args(poll=30),
+              c.NullReporter(), crawl=lambda *a: 0, schedule=_NoSchedule(),
+              sleep=slept.append,
+              stop=lambda: len(ticks) or ticks.append(1))
+        self.assertTrue(slept, "a failing tick retried with no pause")
+        self.assertLessEqual(slept[0], 5)
+
+
+class _NoSchedule:
+    """A schedule that never fires, so a loop test is only about polling."""
+
+    times = ["09:00"]
+
+    def due(self, _now):
+        return []
 
 
 if __name__ == "__main__":

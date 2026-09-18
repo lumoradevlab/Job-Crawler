@@ -139,8 +139,12 @@ class TelegramNotifier:
         req = urllib.request.Request(
             url, data=body,
             headers={"Content-Type": "application/json"}, method="POST")
+        # A long poll is meant to sit idle, so the socket has to outlast it.
+        # Left at 30s a getUpdates asking Telegram to wait 60 would be killed
+        # locally every time and look exactly like a network fault.
+        patience = 30 + int(payload.get("timeout") or 0)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=patience) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = ""
@@ -271,7 +275,7 @@ class TelegramNotifier:
         return sent
 
     # -- receiving ---------------------------------------------------------
-    def updates(self, offset=None, limit=100):
+    def updates(self, offset=None, limit=100, wait=0):
         """Every update waiting, oldest first.
 
         Telegram holds an undelivered update for 24 hours and then drops it,
@@ -280,7 +284,16 @@ class TelegramNotifier:
         make it worse, which is why acknowledging is a separate step — see
         acknowledge().
         """
-        payload = {"timeout": 0, "limit": limit,
+        # `wait` is Telegram's long poll: the connection is held open until
+        # an update arrives or the seconds run out. It is the difference
+        # between a tap answered in milliseconds and one answered whenever
+        # the caller's sleep happens to end — with timeout=0 and a 10s loop,
+        # every tap waited five seconds on average for no reason.
+        #
+        # It costs nothing extra. A held-open request is one connection
+        # doing nothing, where polling every 10s is 8,640 requests a day
+        # that almost always return an empty list.
+        payload = {"timeout": int(wait), "limit": limit,
                    "allowed_updates": ["callback_query", "message"]}
         if offset is not None:
             payload["offset"] = offset
