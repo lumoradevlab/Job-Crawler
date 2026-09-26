@@ -64,8 +64,13 @@ def parser():
                         "(default 30). Telegram returns the instant someone "
                         "types, so this is a ceiling on an idle wait, not a "
                         "delay before a reply")
-    p.add_argument("--at", nargs="+", default=["01:00", "13:00"],
-                   type=clock_time, metavar="HH:MM",
+    # append rather than nargs="+": the unit file spelled it
+    # "--at 09:00 --at 21:00", which reads naturally and which nargs
+    # silently collapses to just the last one — the 09:00 crawl was never
+    # scheduled at all. Both spellings work now, and "--at 09:00 21:00"
+    # still does too because each occurrence takes one or more values.
+    p.add_argument("--at", action="extend", nargs="+",
+                   default=None, type=clock_time, metavar="HH:MM",
                    help="when to crawl under --watch, local time to this "
                         "machine (default 01:00 13:00)")
     p.add_argument("--dry-run", action="store_true",
@@ -273,6 +278,13 @@ def watch(bot, subs, args, report, crawl=crawl_and_send, schedule=None,
     report.line(f"watching · long-poll {args.poll}s · "
                 f"crawling at {', '.join(schedule.times)}")
     while not stop():
+        # The two halves are guarded separately, and that separation is the
+        # point. Sharing one try meant a failed poll jumped the except and
+        # skipped the schedule check with it — so a read timeout landing
+        # anywhere near a slot lost that crawl for the day, silently. The
+        # 09:00 batch never once fired in a fortnight of uptime for exactly
+        # this reason, while 21:00 fired fourteen times.
+        failed = False
         try:
             # The wait happens inside the request rather than after it.
             # Telegram returns the moment someone types or taps, so a reply
@@ -283,16 +295,26 @@ def watch(bot, subs, args, report, crawl=crawl_and_send, schedule=None,
                 report.line(f"{handled} message"
                             f"{'' if handled == 1 else 's'} answered")
                 subs.save()
+        except Exception as e:
+            # A daemon outlives one bad tick. Telegram goes away, a read
+            # stalls — neither is worth losing the process and every signup
+            # that arrives while it is down.
+            report.warn(f"  ! poll failed: {e}")
+            failed = True
+
+        # Always reached, however the poll went. A crawl is the one thing
+        # here that cannot be made up later: a missed slot is a day with no
+        # jobs for everyone, where a missed poll costs seconds.
+        try:
             for slot in schedule.due(clock()):
                 report.line(f"— {slot} crawl —")
                 crawl(bot, subs, args, report)
         except Exception as e:
-            # A daemon outlives one bad tick. Telegram goes away, a board
-            # times out, a crawl raises — none of that is worth losing the
-            # process and every signup that arrives while it is down.
-            report.warn(f"  ! tick failed: {e}")
-            # Only here: a failing long poll returns at once, and a tight
-            # retry loop against a broken Telegram is a request flood.
+            report.warn(f"  ! crawl failed: {e}")
+
+        if failed:
+            # Only after a failure: a failing long poll returns at once, and
+            # a tight retry against a broken Telegram is a request flood.
             sleep(min(args.poll, 5))
     return 0
 
@@ -318,8 +340,15 @@ def watch_forever(bot, subs, args, report):
     return rc
 
 
+DEFAULT_CRAWL_TIMES = ["01:00", "13:00"]
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
+    # argparse cannot hold a mutable default under action="extend" without
+    # appending to it across calls, so the default is applied here instead.
+    if not args.at:
+        args.at = list(DEFAULT_CRAWL_TIMES)
     load_env_file()
     report = Reporter(quiet=args.quiet)
 

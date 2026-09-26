@@ -922,6 +922,183 @@ class TestLongPoll(unittest.TestCase):
         self.assertLessEqual(slept[0], 5)
 
 
+class TestTickIsolation(unittest.TestCase):
+    """A failed poll must not take the crawl with it.
+
+    Both halves shared one try, so a read timeout jumped the except and
+    skipped schedule.due() on the way. A stall landing anywhere near a slot
+    lost that crawl for the whole day, and silently — the 09:00 batch never
+    once fired in a fortnight of uptime while 21:00 fired fourteen times.
+    """
+
+    def _args(self, **over):
+        from jobcrawler.notify.serve import parser
+        argv = []
+        for k, v in over.items():
+            argv += [f"--{k.replace('_', '-')}", str(v)]
+        return parser().parse_args(argv)
+
+    def _run_once(self, bot, schedule):
+        from jobcrawler.notify.serve import watch
+        crawled, ticks = [], []
+        watch(bot, Subscribers("/dev/null"), self._args(poll=30),
+              c.NullReporter(),
+              crawl=lambda *a: crawled.append(1),
+              schedule=schedule, sleep=lambda s: None,
+              stop=lambda: len(ticks) or ticks.append(1))
+        return crawled
+
+    def test_a_failed_poll_still_lets_the_crawl_run(self):
+        class Stalling(StubBot):
+            def updates(self, offset=None, limit=100, wait=0):
+                raise RuntimeError("The read operation timed out")
+
+        crawled = self._run_once(Stalling(), _DueOnce())
+        self.assertEqual(len(crawled), 1,
+                         "the crawl was skipped because the poll failed")
+
+    def test_a_failed_crawl_does_not_stop_the_next_poll(self):
+        from jobcrawler.notify.serve import watch
+
+        class Exploding:
+            times = ["09:00"]
+            def due(self, _now):
+                return ["09:00"]
+
+        bot, polls = StubBot(), []
+        ticks = []
+
+        def boom(*_a):
+            raise RuntimeError("a board went away")
+
+        watch(bot, Subscribers("/dev/null"), self._args(poll=30),
+              c.NullReporter(), crawl=boom, schedule=Exploding(),
+              sleep=lambda s: None,
+              stop=lambda: len(ticks) >= 2 or ticks.append(1))
+        self.assertGreaterEqual(len(bot.waits), 2,
+                                "a raising crawl stopped the polling")
+
+    def test_a_healthy_tick_does_not_sleep(self):
+        # The sleep exists to slow a retry loop, not to pace a working one —
+        # sleeping after a good poll is the delay long polling removed.
+        from jobcrawler.notify.serve import watch
+        slept, ticks = [], []
+        watch(StubBot(), Subscribers("/dev/null"), self._args(poll=30),
+              c.NullReporter(), crawl=lambda *a: 0, schedule=_NoSchedule(),
+              sleep=slept.append,
+              stop=lambda: len(ticks) or ticks.append(1))
+        self.assertEqual(slept, [])
+
+    def test_a_stalled_read_is_retried_before_being_reported(self):
+        # Twenty-one log lines a day of "read operation timed out" buried a
+        # real bug. One quiet retry either succeeds or confirms a fault.
+        import jobcrawler.notify.telegram as tg
+        calls = []
+
+        class FakeResp:
+            def read(self):
+                return b'{"ok":true,"result":[]}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        def flaky(req, timeout=None):
+            calls.append(json.loads(req.data)["timeout"])
+            if len(calls) == 1:
+                raise tg.urllib.error.URLError("The read operation timed out")
+            return FakeResp()
+
+        real = tg.urllib.request.urlopen
+        tg.urllib.request.urlopen = flaky
+        try:
+            out = tg.TelegramNotifier("t", "1").updates(wait=30)
+        finally:
+            tg.urllib.request.urlopen = real
+        self.assertEqual(out, [])
+        self.assertEqual(calls, [30, 0], "the retry should not wait again")
+
+    def test_a_real_error_is_not_retried(self):
+        import jobcrawler.notify.telegram as tg
+        calls = []
+
+        def broken(req, timeout=None):
+            calls.append(1)
+            raise tg.urllib.error.URLError("no route to host")
+
+        real = tg.urllib.request.urlopen
+        tg.urllib.request.urlopen = broken
+        try:
+            with self.assertRaises(tg.TelegramError):
+                tg.TelegramNotifier("t", "1").updates(wait=30)
+        finally:
+            tg.urllib.request.urlopen = real
+        self.assertEqual(len(calls), 1)
+
+
+class TestCrawlTimes(unittest.TestCase):
+    """--at has to accumulate, because the unit file repeats the flag.
+
+    The deployed unit said "--at 09:00 --at 21:00". Under nargs="+" that
+    keeps only the last one, so the morning crawl was never scheduled — the
+    daemon logged "crawling at 21:00" for a fortnight and nobody read it as
+    a bug, because it was what the log was expected to look like.
+    """
+
+    def _at(self, *argv):
+        from jobcrawler.notify.serve import parser
+        return parser().parse_args(list(argv)).at
+
+    def test_a_repeated_flag_keeps_every_time(self):
+        self.assertEqual(self._at("--at", "09:00", "--at", "21:00"),
+                         ["09:00", "21:00"])
+
+    def test_several_times_after_one_flag_also_work(self):
+        self.assertEqual(self._at("--at", "09:00", "21:00"),
+                         ["09:00", "21:00"])
+
+    def test_three_repeats_keep_all_three(self):
+        self.assertEqual(
+            self._at("--at", "06:00", "--at", "14:00", "--at", "22:00"),
+            ["06:00", "14:00", "22:00"])
+
+    def test_the_default_is_applied_when_none_is_given(self):
+        from jobcrawler.notify.serve import DEFAULT_CRAWL_TIMES, parser
+        import jobcrawler.notify.serve as serve
+        args = parser().parse_args([])
+        self.assertIsNone(args.at)
+        # main() fills it in; asserting the value here rather than the
+        # mechanism, since an extend default that accumulated across calls
+        # is the bug this shape avoids.
+        self.assertEqual(DEFAULT_CRAWL_TIMES, ["01:00", "13:00"])
+
+    def test_the_default_cannot_accumulate_across_parses(self):
+        from jobcrawler.notify.serve import parser
+        p = parser()
+        p.parse_args(["--at", "07:00"])
+        self.assertEqual(p.parse_args(["--at", "08:00"]).at, ["08:00"])
+
+    def test_a_malformed_time_is_still_refused(self):
+        from jobcrawler.notify.serve import parser
+        with self.assertRaises(SystemExit):
+            parser().parse_args(["--at", "9am"])
+
+
+class _DueOnce:
+    """A schedule with one slot that is due right now."""
+
+    times = ["09:00"]
+
+    def __init__(self):
+        self.given = False
+
+    def due(self, _now):
+        if self.given:
+            return []
+        self.given = True
+        return ["09:00"]
+
+
 class _NoSchedule:
     """A schedule that never fires, so a loop test is only about polling."""
 

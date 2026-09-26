@@ -142,7 +142,13 @@ class TelegramNotifier:
         # A long poll is meant to sit idle, so the socket has to outlast it.
         # Left at 30s a getUpdates asking Telegram to wait 60 would be killed
         # locally every time and look exactly like a network fault.
-        patience = 30 + int(payload.get("timeout") or 0)
+        #
+        # The margin is generous because a held-open connection is exactly
+        # the kind that stalls: measured on a live box, one long poll in
+        # twenty read-timed-out at 60s while the same request succeeded
+        # immediately on retry. A tighter socket turns ordinary internet
+        # weather into a logged failure.
+        patience = 45 + int(payload.get("timeout") or 0)
         try:
             with urllib.request.urlopen(req, timeout=patience) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -297,7 +303,18 @@ class TelegramNotifier:
                    "allowed_updates": ["callback_query", "message"]}
         if offset is not None:
             payload["offset"] = offset
-        return self._call("getUpdates", payload) or []
+        try:
+            return self._call("getUpdates", payload) or []
+        except TelegramError as first:
+            # One retry, and a short one. A stalled read on a held-open
+            # connection is common enough that surfacing it as a failure
+            # made twenty-one log lines a day and buried a real bug in the
+            # noise; asking again with no wait either returns at once or
+            # confirms something is genuinely wrong.
+            if "timed out" not in str(first).lower():
+                raise
+            payload["timeout"] = 0
+            return self._call("getUpdates", payload) or []
 
     def acknowledge(self, update_id):
         """Tell Telegram a batch is handled, so it is not served again.
