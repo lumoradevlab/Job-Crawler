@@ -1036,6 +1036,54 @@ class TestTickIsolation(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
 
+class TestCrawlTimes(unittest.TestCase):
+    """--at has to accumulate, because the unit file repeats the flag.
+
+    The deployed unit said "--at 09:00 --at 21:00". Under nargs="+" that
+    keeps only the last one, so the morning crawl was never scheduled — the
+    daemon logged "crawling at 21:00" for a fortnight and nobody read it as
+    a bug, because it was what the log was expected to look like.
+    """
+
+    def _at(self, *argv):
+        from jobcrawler.notify.serve import parser
+        return parser().parse_args(list(argv)).at
+
+    def test_a_repeated_flag_keeps_every_time(self):
+        self.assertEqual(self._at("--at", "09:00", "--at", "21:00"),
+                         ["09:00", "21:00"])
+
+    def test_several_times_after_one_flag_also_work(self):
+        self.assertEqual(self._at("--at", "09:00", "21:00"),
+                         ["09:00", "21:00"])
+
+    def test_three_repeats_keep_all_three(self):
+        self.assertEqual(
+            self._at("--at", "06:00", "--at", "14:00", "--at", "22:00"),
+            ["06:00", "14:00", "22:00"])
+
+    def test_the_default_is_applied_when_none_is_given(self):
+        from jobcrawler.notify.serve import DEFAULT_CRAWL_TIMES, parser
+        import jobcrawler.notify.serve as serve
+        args = parser().parse_args([])
+        self.assertIsNone(args.at)
+        # main() fills it in; asserting the value here rather than the
+        # mechanism, since an extend default that accumulated across calls
+        # is the bug this shape avoids.
+        self.assertEqual(DEFAULT_CRAWL_TIMES, ["01:00", "13:00"])
+
+    def test_the_default_cannot_accumulate_across_parses(self):
+        from jobcrawler.notify.serve import parser
+        p = parser()
+        p.parse_args(["--at", "07:00"])
+        self.assertEqual(p.parse_args(["--at", "08:00"]).at, ["08:00"])
+
+    def test_a_malformed_time_is_still_refused(self):
+        from jobcrawler.notify.serve import parser
+        with self.assertRaises(SystemExit):
+            parser().parse_args(["--at", "9am"])
+
+
 class _DueOnce:
     """A schedule with one slot that is due right now."""
 

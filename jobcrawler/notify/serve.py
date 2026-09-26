@@ -64,8 +64,13 @@ def parser():
                         "(default 30). Telegram returns the instant someone "
                         "types, so this is a ceiling on an idle wait, not a "
                         "delay before a reply")
-    p.add_argument("--at", nargs="+", default=["01:00", "13:00"],
-                   type=clock_time, metavar="HH:MM",
+    # append rather than nargs="+": the unit file spelled it
+    # "--at 09:00 --at 21:00", which reads naturally and which nargs
+    # silently collapses to just the last one — the 09:00 crawl was never
+    # scheduled at all. Both spellings work now, and "--at 09:00 21:00"
+    # still does too because each occurrence takes one or more values.
+    p.add_argument("--at", action="extend", nargs="+",
+                   default=None, type=clock_time, metavar="HH:MM",
                    help="when to crawl under --watch, local time to this "
                         "machine (default 01:00 13:00)")
     p.add_argument("--dry-run", action="store_true",
@@ -335,8 +340,15 @@ def watch_forever(bot, subs, args, report):
     return rc
 
 
+DEFAULT_CRAWL_TIMES = ["01:00", "13:00"]
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
+    # argparse cannot hold a mutable default under action="extend" without
+    # appending to it across calls, so the default is applied here instead.
+    if not args.at:
+        args.at = list(DEFAULT_CRAWL_TIMES)
     load_env_file()
     report = Reporter(quiet=args.quiet)
 
